@@ -1,0 +1,64 @@
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Entornos locales
+.env
+.env.local
+.env.*.local
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db
+
+# Carpeta de reportes y auditorías completas (ignorar todas, excepto que quieras subir manualmente algunas)
+data/audits/*
+reports/*
+
+# Archivos específicos a ignorar (aunque ya están cubiertos arriba, se listan por claridad)
+data/audits/1757692156745.json
+data/audits/1757711198909.json
+data/audits/1757711419505.json
+data/audits/1757713908072.json
+data/audits/1757720637237.json
+reports/1757692156745.md
+reports/1757711198909.md
+reports/1757711419505.md
+reports/1757713908072.md
+reports/1757720637237.md
+
+#Python
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+EOF
+
+# deps
+node_modules/
+
+# credenciales/local
+.env
+
+# cachés/modelos/pesados
+hf_cache/
+hf-cache/
+models/
+*.bin
+
+# datos locales (no versionar)
+data/
+reports/
+audios/
+transcripts/
+
+# medios de audio
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg

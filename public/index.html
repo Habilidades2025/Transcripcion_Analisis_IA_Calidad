@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>IA Analista de Calidad</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;max-width:1100px;margin:30px auto;padding:0 16px}
+    header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px}
+    nav{display:flex;gap:6px}
+    button{padding:8px 12px;border:0;border-radius:8px;cursor:pointer}
+    .primary{background:#4f46e5;color:#fff}
+    .muted{background:#f3f4f6}
+    fieldset{border:1px solid #ddd;padding:16px;border-radius:12px;margin:16px 0}
+    label{display:block;margin:8px 0 4px}
+    input[type="text"],input[type="file"],select,textarea{width:100%;padding:8px;border:1px solid #ccc;border-radius:8px}
+    pre{background:#0b1020;color:#d7e1ff;padding:16px;border-radius:12px;overflow:auto}
+    table{width:100%;border-collapse:collapse;margin-top:8px}
+    th,td{padding:8px;border-bottom:1px solid #eee;text-align:left}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#eef}
+    .row{display:flex;gap:12px;align-items:start;flex-wrap:wrap}
+    .col{flex:1;min-width:280px}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>IA Analista de Calidad</h1>
+    <nav>
+      <button id="tabAnalyze" class="primary">Analizar</button>
+      <button id="tabConsolidado" class="muted">Consolidado</button>
+    </nav>
+  </header>
+
+  <!-- ==================== ANALIZAR ==================== -->
+<!-- En tu index.html, dentro de <section id="viewAnalyze"> … </section> -->
+<section id="viewAnalyze">
+  <form id="formBatch">
+    <fieldset>
+      <legend>Cargar bloque</legend>
+
+      <label for="provider"><b>Modo de transcripción</b></label>
+      <select id="provider" name="provider">
+        <option value="faster">Local (Faster-Whisper)</option>
+        <option value="openai">OpenAI Whisper (cloud)</option>
+      </select>
+
+      <label for="matrix">Matriz (.xlsx)</label>
+      <input id="matrix" name="matrix" type="file" accept=".xlsx" required />
+
+      <label for="audios">Audios (múltiples)</label>
+      <input id="audios" name="audios" type="file" accept=".mp3,.wav,.m4a,audio/*" multiple required />
+
+      <div class="field">
+        <label for="metodologia"><b>Metodología</b></label>
+        <select id="metodologia" name="metodologia">
+          <option value="">(opcional)</option>
+          <option value="cobranza">Cobranza</option>
+          <option value="servicio">Servicio</option>
+          <option value="comercial">Comercial</option>
+        </select>
+      </div>
+
+      <div class="field" id="cartera-field" style="display:none">
+        <label for="cartera"><b>Cartera</b></label>
+        <select id="cartera" name="cartera">
+          <option value="">Selecciona cartera</option>
+        </select>
+      </div>
+
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="primary" type="submit">Procesar bloque</button>
+        <button class="muted" type="reset">Limpiar</button>
+      </div>
+    </fieldset>
+  </form>
+
+  <div id="progressCard" style="display:none;border:1px solid #ddd;border-radius:12px;padding:16px;margin-top:12px">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <b>Progreso del lote</b>
+      <span id="lblProgress">0 / 0</span>
+    </div>
+    <div style="background:#eee;border-radius:999px;height:10px;margin:8px 0">
+      <div id="barProgress" style="background:#22c55e;height:10px;border-radius:999px;width:0%"></div>
+    </div>
+    <div id="listProgress" style="max-height:180px;overflow:auto;font-size:14px"></div>
+  </div>
+
+  <div id="resultsCard" style="display:none;margin-top:16px">
+    <h2>Resultados del bloque</h2>
+
+    <details id="detIndividual" style="margin:8px 0">
+      <summary><b>Ver resultados individuales</b> <span id="countInd" class="pill" style="margin-left:6px">0</span></summary>
+      <div id="individualList" style="margin-top:8px;display:flex;flex-direction:column;gap:8px"></div>
+    </details>
+
+    <fieldset>
+      <legend>Resumen grupal</legend>
+      <p><b>Total:</b> <span id="grpTotal">-</span> &nbsp; <b>Promedio:</b> <span id="grpAvg">-</span></p>
+      <p id="grpResumen" style="white-space:pre-wrap"></p>
+
+      <h4>Hallazgos más comunes</h4>
+      <ul id="grpHall"></ul>
+
+      <h4>Atributos afectados</h4>
+      <p><b>Críticos:</b> <span id="grpCrit">—</span></p>
+      <p><b>No críticos:</b> <span id="grpNoCrit">—</span></p>
+
+      <h4>Plan de mejora</h4>
+      <pre id="grpPlan" style="white-space:pre-wrap"></pre>
+    </fieldset>
+  </div>
+</section>
+
+  <!-- ==================== CONSOLIDADO ==================== -->
+  <section id="viewConsolidado" style="display:none">
+    <div style="display:flex;gap:8px;align-items:center;">
+      <button id="btnReload" class="muted">Refrescar</button>
+      <a id="btnExport" href="/audits/export.xlsx" target="_blank"><button>Exportar Excel</button></a>
+      <a id="btnExportJson" href="/audits/export.json" target="_blank"><button>Exportar JSON</button></a>
+    </div>
+    <div id="summary" style="margin-top:16px"></div>
+    <h3>Auditorías</h3>
+    <table id="tbl">
+      <thead><tr><th>Fecha</th><th>Call ID</th><th>Agente</th><th>Cliente</th><th>Nota</th><th>Reporte</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <script src="scripts.js"></script>
+</body>
+</html>
