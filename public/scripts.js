@@ -1,5 +1,3 @@
-// public/scripts.js
-
 // ---------- Utils ----------
 function $(id) { return document.getElementById(id); }
 function setOut(obj) { const out = $('out'); if (out) out.textContent = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2); }
@@ -213,6 +211,7 @@ const $btnReload = $('btnReload');
 const $summary   = $('summary');
 const $tbody     = document.querySelector('#tbl tbody');
 
+// (1.B) — plegables para Por agente / Por categoría
 function renderSummaryCompatible(s) {
   const isOld = s && (s.totalCalls !== undefined || s.byAgent || s.byCategory);
   const total = isOld ? (s.totalCalls ?? 0) : (s.total ?? 0);
@@ -224,8 +223,12 @@ function renderSummaryCompatible(s) {
     <div class="pill">Promedio: <b>${promTxt}</b></div>
   `;
 
-  html += `<h3>Por agente</h3>`;
-  html += `<div style="display:flex;flex-wrap:wrap;gap:8px;">`;
+  // ---- Por agente (plegable)
+  html += `
+    <details id="secPorAgente" open>
+      <summary style="font-weight:600; cursor:pointer;">Por agente</summary>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;">
+  `;
   if (isOld && s.byAgent) {
     const chips = Object.entries(s.byAgent).map(([k, v]) =>
       `<span class="pill">${k || 'Sin agente'}: ${v.count} (${Math.round(v.avgScore || 0)})</span>`
@@ -239,10 +242,14 @@ function renderSummaryCompatible(s) {
   } else {
     html += '<span>—</span>';
   }
-  html += `</div>`;
+  html += `</div></details>`;
 
-  html += `<h3>Por categoría</h3>`;
-  html += `<div style="display:flex;flex-wrap:wrap;gap:8px;">`;
+  // ---- Por categoría (plegable)
+  html += `
+    <details id="secPorCategoria">
+      <summary style="font-weight:600; cursor:pointer;">Por categoría</summary>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;">
+  `;
   if (isOld && s.byCategory) {
     const chips = Object.entries(s.byCategory).map(([k, v]) =>
       `<span class="pill">${k}: ${Math.round(v.avgCumplimiento || 0)}%</span>`
@@ -256,7 +263,7 @@ function renderSummaryCompatible(s) {
   } else {
     html += '<span>—</span>';
   }
-  html += `</div>`;
+  html += `</div></details>`;
 
   return html;
 }
@@ -291,9 +298,13 @@ async function loadAudits() {
       const cli   = it?.metadata?.customerName || it?.analisis?.client_name || '-';
       const nota  = it?.consolidado?.notaFinal ?? '-';
 
+      // (1.A) Link de reporte — usa reportPath si existe; si no, /audits/files/<callId>.md
+      const callId = it?.metadata?.callId || '';
       let reporteHtml = '—';
-      if (it?.reportPath) {
-        const href = isHttpOrRoot(it.reportPath) ? it.reportPath : ('/audits/files/' + basename(it.reportPath));
+      if (callId) {
+        const href = it?.reportPath
+          ? (isHttpOrRoot(it.reportPath) ? it.reportPath : ('/audits/files/' + basename(it.reportPath)))
+          : (`/audits/files/${callId}.md`);
         reporteHtml = `<a href="${href}" target="_blank" rel="noopener">MD</a>`;
       }
 

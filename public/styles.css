@@ -1,0 +1,13 @@
+details {
+  border: 1px solid #eee;
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 10px 0 12px;
+  background: #fafafa;
+}
+details > summary {
+  list-style: none;
+  font-weight: 600;
+  cursor: pointer;
+}
+details > summary::-webkit-details-marker { display: none; }

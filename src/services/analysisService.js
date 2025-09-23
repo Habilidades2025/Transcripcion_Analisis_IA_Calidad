@@ -1,3 +1,4 @@
+// src/services/analysisService.js
 import OpenAI from 'openai';
 
 /** Intenta parsear JSON incluso si el modelo añadió texto alrededor */
@@ -33,6 +34,13 @@ function cleanName(x = '') {
     .replace(/^(señor(?:a)?|sr\.?|sra\.?|srta\.?|don|doña)\s+/i, '')
     .trim();
   return sinHon;
+}
+
+/** Umbral de criticidad (por peso). Por defecto 100. */
+function isCriticalPeso(p) {
+  const thr = Number(process.env.CRITICAL_WEIGHT_VALUE || 100);
+  const n = Number(p);
+  return Number.isFinite(n) && n >= thr;
 }
 
 export async function analyzeTranscriptWithMatrix({ transcript, matrix, prompt = '', context = {} }) {
@@ -81,7 +89,7 @@ export async function analyzeTranscriptWithMatrix({ transcript, matrix, prompt =
         'Evalúas transcripciones con base en una MATRIZ DE CALIDAD.',
         'Respondes ÚNICAMENTE en JSON válido y en español.',
         'Debes evaluar TODOS los atributos solicitados (no omitas ninguno).',
-        'Si no hay evidencia, marca "cumplido": true y usa "justificacion": "No se evidencia incumplimiento".',
+        'Si no hay evidencia clara, explica la razón en "justificacion" y sigue las reglas de calibración provistas.',
         'No inventes datos fuera de la transcripción.'
       ].join(' ') },
       ...(context?.metodologia || context?.cartera || prompt || (extraSystem && extraSystem.length) ? [{
@@ -107,8 +115,10 @@ export async function analyzeTranscriptWithMatrix({ transcript, matrix, prompt =
     .filter(Boolean);
   const expectedCount = expectedAttrNames.length;
 
-  // ---------- Prompt base (pidiendo nombres explícitamente) ----------
+  // ---------- Prompt base (calibración Bogotá + nombres) ----------
   const baseUser = `
+Vas a AUDITAR una transcripción contra una MATRIZ DE CALIDAD. Lee con mucha atención el campo "criterio" de cada atributo: ese texto ES LA REGLA.
+
 MATRIZ (atributo | categoría | peso | criterio opcional):
 ${matrixAsText}
 
@@ -129,7 +139,7 @@ Devuelve JSON ESTRICTAMENTE con el siguiente esquema (sin comentarios):
       "atributo": "string",
       "categoria": "string",
       "cumplido": true,
-      "justificacion": "string (cita/parafrasea evidencia del audio)",
+      "justificacion": "string (cita/parafrasea evidencia del audio; si NO hay evidencia, explica por qué no)",
       "mejora": "string (si no se cumple, propuesta concreta)",
       "reconocimiento": "string (si se cumple de forma destacada)"
     }
@@ -137,12 +147,20 @@ Devuelve JSON ESTRICTAMENTE con el siguiente esquema (sin comentarios):
   "sugerencias_generales": ["string", "string", "string"]
 }
 
+REGLAS DE CALIBRACIÓN (OBLIGATORIAS):
+- LISTA CERRADA: Evalúa ÚNICAMENTE los atributos listados arriba. No inventes atributos ni cambies los nombres.
+- ORDEN: Mantén el MISMO orden que en "ATRIBUTOS ESPERADOS".
+- EVIDENCIA: Cada "justificacion" debe citar o parafrasear una frase breve del audio. Si no puedes citar, explica por qué.
+- CRÍTICOS (peso=100 por defecto): si NO hay evidencia explícita de CUMPLIMIENTO, marca "cumplido": false (fail-closed) y explica. Esto aplica especialmente a obligaciones legales como Ley 1581 / tratamiento de datos.
+- ESCALONAMIENTO (Bogotá): NO es un "plan de pagos". Es ofrecer un SALDO a cobrar que VA BAJANDO en escalas (p.ej. "Saldo $1.200.000 → $900.000 → $700.000"). Si solo hay cuotas/plazos, marca NO CUMPLE.
+- DESPEDIDA DE GUION: Valida lo que indique el "criterio" del atributo. Si el guion exige fórmula de despedida específica (agradecimiento + cierre cordial + identidad), debe oírse. Sin evidencia, NO CUMPLE.
+- NO HALLUCINATIONS: Si tienes dudas o la transcripción es ambigua, NO supongas cumplimiento. Marca NO CUMPLE y deja una mejora concreta.
+- PENALIZACIÓN: Si un atributo se evalúa como afectado/no cumplido, debe quedar "cumplido": false.
+
 REQUISITOS (OBLIGATORIOS):
 - "atributos" debe contener EXACTAMENTE ${expectedCount} elementos.
-- El orden de "atributos" DEBE seguir "ATRIBUTOS ESPERADOS".
+- El orden DEBE seguir "ATRIBUTOS ESPERADOS".
 - "atributo" DEBE copiarse exactamente (mismos acentos).
-- Si no hay evidencia: "cumplido": true y "justificacion": "No se evidencia incumplimiento".
-- No agregues atributos que no están en la matriz.
 - No incluyas texto fuera del JSON.
 - Si no hay evidencia clara de nombres, deja "agent_name" y/o "client_name" como cadena vacía ("").
 `.trim();
@@ -220,8 +238,12 @@ Devuelve el MISMO JSON solicitado antes (con TODOS los atributos y en el mismo o
     const full = (matrix || []).map(row => ({
       atributo: String(row?.atributo ?? row?.Atributo ?? '').trim(),
       categoria: String(row?.categoria ?? row?.Categoria ?? ''),
-      cumplido: true,
-      justificacion: 'No se evidencia incumplimiento',
+      peso: Number(row?.peso ?? row?.Peso ?? 0),
+      critico: isCriticalPeso(row?.peso ?? row?.Peso ?? 0),
+      cumplido: !isCriticalPeso(row?.peso ?? row?.Peso ?? 0), // críticos -> false, no críticos -> true
+      justificacion: !isCriticalPeso(row?.peso ?? row?.Peso ?? 0)
+        ? 'No se evidencia incumplimiento'
+        : 'No se encontró evidencia explícita de cumplimiento (fail-closed por criticidad).',
       mejora: null,
       reconocimiento: null
     }));
@@ -242,16 +264,38 @@ function finalizeFromLLM(json, matrix) {
   for (const row of (matrix || [])) {
     const nombre = String(row?.atributo ?? row?.Atributo ?? '').trim();
     if (!nombre) continue;
+
     const found = byName.get(keyName(nombre));
+    const categoria = String(found?.categoria ?? (row?.categoria ?? row?.Categoria ?? '')).trim();
+    const peso = Number(row?.peso ?? row?.Peso ?? 0);
+    const critico = isCriticalPeso(peso);
+
+    // Si el LLM no devolvió "cumplido", aplicamos default:
+    // - CRÍTICO -> false (fail-closed)
+    // - NO crítico -> true
+    let cumplido;
+    if (typeof found?.cumplido === 'boolean') {
+      cumplido = found.cumplido;
+    } else {
+      cumplido = critico ? false : true;
+    }
+
+    const justif = (found?.justificacion || '').trim();
+    const defaultJustif = cumplido
+      ? 'No se evidencia incumplimiento'
+      : (critico
+          ? 'No se encontró evidencia explícita de cumplimiento (fail-closed por criticidad).'
+          : 'Incumplimiento detectado o evidencia insuficiente.');
+    const mejora = (found?.mejora ?? (cumplido ? null : 'Definir acciones concretas para cumplir el criterio.'));
+
     full.push({
       atributo: nombre,
-      categoria: found?.categoria ?? (row?.categoria ?? row?.Categoria ?? ''),
-      cumplido: (typeof found?.cumplido === 'boolean') ? found.cumplido : true,
-      justificacion: found?.justificacion ?? ((typeof found?.cumplido === 'boolean' && !found.cumplido)
-        ? 'Incumplimiento detectado.'
-        : 'No se evidencia incumplimiento'
-      ),
-      mejora: found?.mejora ?? null,
+      categoria,
+      peso,
+      critico,
+      cumplido,
+      justificacion: justif || defaultJustif,
+      mejora,
       reconocimiento: found?.reconocimiento ?? null
     });
   }
@@ -330,15 +374,34 @@ ${transcriptText}
   const full = (matrix || []).map(row => {
     const nombre = String(row?.atributo ?? row?.Atributo ?? '').trim();
     const found  = byName.get(keyName(nombre));
+
+    const categoria = String(found?.categoria ?? (row?.categoria ?? row?.Categoria ?? '')).trim();
+    const peso = Number(row?.peso ?? row?.Peso ?? 0);
+    const critico = isCriticalPeso(peso);
+
+    let cumplido;
+    if (typeof found?.cumplido === 'boolean') {
+      cumplido = found.cumplido;
+    } else {
+      cumplido = critico ? false : true;
+    }
+
+    const justif = (found?.justificacion || '').trim();
+    const defaultJustif = cumplido
+      ? 'No se evidencia incumplimiento'
+      : (critico
+          ? 'No se encontró evidencia explícita de cumplimiento (fail-closed por criticidad).'
+          : 'Incumplimiento detectado o evidencia insuficiente.');
+    const mejora = (found?.mejora ?? (cumplido ? null : 'Definir acciones concretas para cumplir el criterio.'));
+
     return {
       atributo: nombre,
-      categoria: found?.categoria ?? (row?.categoria ?? row?.Categoria ?? ''),
-      cumplido: (typeof found?.cumplido === 'boolean') ? found.cumplido : true,
-      justificacion: found?.justificacion ?? ((typeof found?.cumplido === 'boolean' && !found.cumplido)
-        ? 'Incumplimiento detectado.'
-        : 'No se evidencia incumplimiento'
-      ),
-      mejora: found?.mejora ?? null,
+      categoria,
+      peso,
+      critico,
+      cumplido,
+      justificacion: justif || defaultJustif,
+      mejora,
       reconocimiento: found?.reconocimiento ?? null
     };
   });
