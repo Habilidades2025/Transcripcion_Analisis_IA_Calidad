@@ -4,40 +4,75 @@
   <meta charset="utf-8" />
   <title>IA Analista de Calidad</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
-    body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;max-width:1100px;margin:30px auto;padding:0 16px}
-    header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px}
-    nav{display:flex;gap:6px}
-    button{padding:8px 12px;border:0;border-radius:8px;cursor:pointer}
-    .primary{background:#4f46e5;color:#fff}
-    .muted{background:#f3f4f6}
-    fieldset{border:1px solid #ddd;padding:16px;border-radius:12px;margin:16px 0}
-    label{display:block;margin:8px 0 4px}
-    input[type="text"],input[type="file"],select,textarea{width:100%;padding:8px;border:1px solid #ccc;border-radius:8px}
-    pre{background:#0b1020;color:#d7e1ff;padding:16px;border-radius:12px;overflow:auto}
-    table{width:100%;border-collapse:collapse;margin-top:8px}
-    th,td{padding:8px;border-bottom:1px solid #eee;text-align:left}
-    .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#eef}
-    .row{display:flex;gap:12px;align-items:start;flex-wrap:wrap}
-    .col{flex:1;min-width:280px}
-  </style>
+  <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
   <header>
     <h1>IA Analista de Calidad</h1>
     <nav>
+      <button id="tabTranscribe" class="primary">Transcribir</button>
       <button id="tabAnalyze" class="primary">Analizar</button>
       <button id="tabConsolidado" class="muted">Consolidado</button>
     </nav>
   </header>
 
+    <!-- ==================== TRANSCRIBIR ==================== -->
+  <section id="viewTranscribe" style="display:none">
+  <div class="card">
+    <h2>Transcribir llamadas</h2>
+    <p>Sube uno o varios audios. Si subes 1, se descargará un .txt. Si subes varios, se descargará un .zip con todos los .txt.</p>
+
+    <form id="formTranscribe" enctype="multipart/form-data">
+      <div class="row">
+        <label>Audios</label>
+        <input id="txAudios" type="file" name="audios" accept=".wav,.mp3,.m4a,.flac,.ogg" multiple required />
+      </div>
+
+      <div class="row">
+        <label>Proveedor</label>
+        <select id="txProvider" name="provider">
+          <option value="faster">Faster-Whisper</option>
+          <option value="openai">OpenAI</option>
+        </select>
+      </div>
+
+      <!--<div class="row">
+        <label>Idioma</label>
+        <select id="txLang" name="language">
+          <option value="es-ES" selected>es-ES</option>
+          <option value="es">es</option>
+          <option value="en">en</option> 
+        </select>
+      </div>-->
+
+      <!-- Opcional: solo si usas canal de agente/estéreo -->
+      <!--<div class="row">
+        <label>Modo</label>
+        <select id="txMode" name="mode">
+          <option value="">Auto</option>
+          <option value="mono">Mono</option>
+          <option value="stereo">Stereo (dos canales)</option>
+        </select>
+      </div>-->
+      <!--<div class="row">
+        <label>Canal del agente (0/1)</label>
+        <input id="txAgentChannel" name="agentChannel" type="number" min="0" max="1" placeholder="(opcional)" />
+      </div>-->
+      <div>  </div>
+      <div class="row">
+        <button id="btnTranscribe" class="primary" type="submit">Transcribir</button>
+      </div>
+    </form>
+
+    <p id="txStatus" class="muted"></p>
+    <a id="txDownloadLink" href="#" download style="display:none">Descargar de nuevo</a>
+  </div>
+</section>
   <!-- ==================== ANALIZAR ==================== -->
-<!-- En tu index.html, dentro de <section id="viewAnalyze"> … </section> -->
 <section id="viewAnalyze">
   <form id="formBatch">
     <fieldset>
       <legend>Cargar bloque</legend>
-
       <label for="provider"><b>Modo de transcripción</b></label>
       <select id="provider" name="provider">
         <option value="faster">Local (Faster-Whisper)</option>
@@ -49,6 +84,12 @@
 
       <label for="audios">Audios (múltiples)</label>
       <input id="audios" name="audios" type="file" accept=".mp3,.wav,.m4a,audio/*" multiple required />
+
+      <div class="field">
+        <label for="script">Guion de la campaña (.txt / .md, opcional)</label>
+        <input id="script" name="script" type="file" accept=".txt,.md,.pdf" required>
+        <small>Si lo adjuntas, se validará el uso del guion y las políticas específicas.</small>
+      </div>
 
       <div class="field">
         <label for="metodologia"><b>Metodología</b></label>

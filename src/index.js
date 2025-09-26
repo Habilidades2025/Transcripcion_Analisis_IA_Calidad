@@ -48,7 +48,7 @@ app.use('/', batchRouter); // expone /batch/start y /batch/progress/:jobId
 // --- Arranque con fallback de puerto ---
 function start(port, attemptsLeft = 3) {
   const server = app.listen(port, () => {
-    console.log(`API escuchando en http://127.0.0.1:${port}`);
+    console.log(`Servicio activo en http://127.0.0.1:${port}`);
   });
 
   // Evita timeouts en cargas pesadas (batch)

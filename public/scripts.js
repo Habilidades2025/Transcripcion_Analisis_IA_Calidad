@@ -3,54 +3,175 @@ function $(id) { return document.getElementById(id); }
 function setOut(obj) { const out = $('out'); if (out) out.textContent = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2); }
 function basename(p) { if (!p) return null; return p.toString().split(/[\\/]/).pop(); }
 function isHttpOrRoot(href) { return typeof href === 'string' && (href.startsWith('http://') || href.startsWith('https://') || href.startsWith('/')); }
+function filenameFromContentDisposition(h) {
+  // intenta extraer filename="..."
+  if (!h) return null;
+  const m = /filename\*?=(?:UTF-8''|")?([^";]+)(?:")?/i.exec(h);
+  if (m && m[1]) {
+    try { return decodeURIComponent(m[1]); } catch { return m[1]; }
+  }
+  return null;
+}
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename || 'download';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 0);
+}
+function escapeHtml(s) {
+  return String(s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
 
 // ---------- Tabs ----------
+const $tabTranscribe  = $('tabTranscribe');
 const $tabAnalyze      = $('tabAnalyze');
 const $tabConsolidado  = $('tabConsolidado');
+
+const $viewTranscribe  = $('viewTranscribe');
 const $viewAnalyze     = $('viewAnalyze');
 const $viewConsolidado = $('viewConsolidado');
 
+function setTabClasses(active) {
+  const map = {
+    transcribe: $tabTranscribe,
+    analyze: $tabAnalyze,
+    consolidado: $tabConsolidado
+  };
+  Object.entries(map).forEach(([k, btn]) => {
+    if (!btn) return;
+    btn.className = (k === active) ? 'primary' : 'muted';
+  });
+}
+function showTranscribe() {
+  if (!$viewTranscribe || !$viewAnalyze || !$viewConsolidado) return;
+  setTabClasses('transcribe');
+  $viewTranscribe.style.display = '';
+  $viewAnalyze.style.display = 'none';
+  $viewConsolidado.style.display = 'none';
+}
 function showAnalyze() {
-  if (!$tabAnalyze || !$tabConsolidado || !$viewAnalyze || !$viewConsolidado) return;
-  $tabAnalyze.className = 'primary';
-  $tabConsolidado.className = 'muted';
+  if (!$viewTranscribe || !$viewAnalyze || !$viewConsolidado) return;
+  setTabClasses('analyze');
+  $viewTranscribe.style.display = 'none';
   $viewAnalyze.style.display = '';
   $viewConsolidado.style.display = 'none';
 }
 async function showConsolidado() {
-  if (!$tabAnalyze || !$tabConsolidado || !$viewAnalyze || !$viewConsolidado) return;
-  $tabAnalyze.className = 'muted';
-  $tabConsolidado.className = 'primary';
+  if (!$viewTranscribe || !$viewAnalyze || !$viewConsolidado) return;
+  setTabClasses('consolidado');
+  $viewTranscribe.style.display = 'none';
   $viewAnalyze.style.display = 'none';
   $viewConsolidado.style.display = '';
   await reloadConsolidado();
 }
+$tabTranscribe?.addEventListener('click', showTranscribe);
 $tabAnalyze?.addEventListener('click', showAnalyze);
 $tabConsolidado?.addEventListener('click', showConsolidado);
 
-// ---------- Dependiente: Metodología -> Cartera ----------
-const $metodologia  = $('metodologia');
-const $carteraField = $('cartera-field');
-const $cartera      = $('cartera');
+// ---------- TRANSCRIBIR (nuevo módulo) ----------
+const $formTx      = $('formTranscribe');
+const $txAudios    = $('txAudios');
+const $txProvider  = $('txProvider');
+const $txLang      = $('txLang');
+const $txMode      = $('txMode');
+const $txAgentChan = $('txAgentChannel');
+const $txBtn       = $('btnTranscribe');
+const $txStatus    = $('txStatus');
+const $txDownload  = $('txDownloadLink'); // ancla para mostrar el link final
 
-$metodologia?.addEventListener('change', function () {
-  const metodologia = this.value;
-  if ($cartera) $cartera.innerHTML = '<option value="">Selecciona cartera</option>';
+$formTx?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (!$txAudios?.files?.length) {
+    alert('Adjunta al menos un audio.');
+    return;
+  }
+  const files = Array.from($txAudios.files);
+  const many = files.length > 1;
 
-  if (metodologia === 'cobranza') {
-    if ($carteraField) $carteraField.style.display = 'block';
-    [
-      { value: 'carteras_bogota',   text: 'Carteras propias Bogotá'  },
-      { value: 'carteras_medellin', text: 'Carteras propias Medellín'}
-    ].forEach(op => {
-      const option = document.createElement('option');
-      option.value = op.value; option.textContent = op.text;
-      $cartera?.appendChild(option);
-    });
-  } else {
-    if ($carteraField) $carteraField.style.display = 'none';
+  // reset UI
+  if ($txStatus)  $txStatus.textContent = '';
+  if ($txDownload) { $txDownload.style.display = 'none'; $txDownload.removeAttribute('href'); $txDownload.removeAttribute('download'); }
+  if ($txBtn) { $txBtn.disabled = true; $txBtn.textContent = 'Procesando...'; }
+
+  try {
+    if (many) {
+      // ZIP
+      const fd = new FormData();
+      files.forEach(f => fd.append('audios', f));
+      if ($txProvider?.value)   fd.append('provider', $txProvider.value);
+      if ($txLang?.value)       fd.append('language', $txLang.value);
+      if ($txMode?.value)       fd.append('mode', $txMode.value);
+      if ($txAgentChan?.value)  fd.append('agentChannel', $txAgentChan.value);
+
+      if ($txStatus) $txStatus.textContent = `Transcribiendo ${files.length} audios... (esto puede tardar)`;
+      const resp = await fetch('/transcribe-zip', { method: 'POST', body: fd });
+      if (!resp.ok) {
+        const err = await safeJson(resp);
+        throw new Error(err?.error || `Error HTTP ${resp.status}`);
+      }
+      const blob = await resp.blob();
+      // filename
+      const cd = resp.headers.get('Content-Disposition');
+      const suggest = filenameFromContentDisposition(cd) || 'transcripciones.zip';
+      downloadBlob(blob, suggest);
+
+      if ($txStatus) $txStatus.textContent = `¡Listo! Se descargó ${suggest}`;
+      if ($txDownload) {
+        const url = URL.createObjectURL(blob);
+        $txDownload.href = url;
+        $txDownload.download = suggest;
+        $txDownload.style.display = '';
+        // liberamos URL luego de un rato si el usuario no hace click
+        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      }
+    } else {
+      // 1 archivo -> TXT
+      const fd = new FormData();
+      fd.append('audio', files[0]);
+      if ($txProvider?.value)   fd.append('provider', $txProvider.value);
+      if ($txLang?.value)       fd.append('language', $txLang.value);
+      if ($txMode?.value)       fd.append('mode', $txMode.value);
+      if ($txAgentChan?.value)  fd.append('agentChannel', $txAgentChan.value);
+
+      if ($txStatus) $txStatus.textContent = `Transcribiendo ${files[0].name}...`;
+      const resp = await fetch('/transcribe-txt', { method: 'POST', body: fd });
+      if (!resp.ok) {
+        const err = await safeJson(resp);
+        throw new Error(err?.error || `Error HTTP ${resp.status}`);
+      }
+      const blob = await resp.blob();
+      // sugerir nombre .txt
+      const cd = resp.headers.get('Content-Disposition');
+      let suggest = filenameFromContentDisposition(cd);
+      if (!suggest) {
+        const base = (files[0].name || 'transcripcion').replace(/\.[^.]+$/, '');
+        suggest = `${base}.txt`;
+      }
+      downloadBlob(blob, suggest);
+
+      if ($txStatus) $txStatus.textContent = `¡Listo! Se descargó ${suggest}`;
+      if ($txDownload) {
+        const url = URL.createObjectURL(blob);
+        $txDownload.href = url;
+        $txDownload.download = suggest;
+        $txDownload.style.display = '';
+        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      }
+    }
+  } catch (err) {
+    console.error('[TX][ERROR]', err);
+    alert('Error transcribiendo: ' + (err?.message || err));
+    if ($txStatus) $txStatus.textContent = 'Ocurrió un error. Intenta nuevamente.';
+  } finally {
+    if ($txBtn) { $txBtn.disabled = false; $txBtn.textContent = 'Transcribir'; }
   }
 });
+
+async function safeJson(resp) {
+  try { return await resp.json(); } catch { return null; }
+}
 
 // ---------- Analizar (BATCH) ----------
 const $formBatch  = $('formBatch');
@@ -70,6 +191,10 @@ const $detIndividual= $('detIndividual');
 const $countInd     = $('countInd');
 const $individualList = $('individualList');
 
+const $metodologia  = $('metodologia');
+const $carteraField = $('cartera-field');
+const $cartera      = $('cartera');
+
 const $grpTotal   = $('grpTotal');
 const $grpAvg     = $('grpAvg');
 const $grpResumen = $('grpResumen');
@@ -77,6 +202,26 @@ const $grpHall    = $('grpHall');
 const $grpCrit    = $('grpCrit');
 const $grpNoCrit  = $('grpNoCrit');
 const $grpPlan    = $('grpPlan');
+
+// Dependiente: Metodología -> Cartera
+$metodologia?.addEventListener('change', function () {
+  const metodologia = this.value;
+  if ($cartera) $cartera.innerHTML = '<option value="">Selecciona cartera</option>';
+
+  if (metodologia === 'cobranza') {
+    if ($carteraField) $carteraField.style.display = 'block';
+    [
+      { value: 'carteras_bogota',   text: 'Carteras propias Bogotá'  },
+      { value: 'carteras_medellin', text: 'Carteras propias Medellín'}
+    ].forEach(op => {
+      const option = document.createElement('option');
+      option.value = op.value; option.textContent = op.text;
+      $cartera?.appendChild(option);
+    });
+  } else {
+    if ($carteraField) $carteraField.style.display = 'none';
+  }
+});
 
 let evtSource = null;
 
@@ -126,7 +271,6 @@ function startSSE(jobId) {
     }
   });
   evtSource.onerror = () => {
-    // si hay error en SSE, lo cerramos para no dejar conexión colgada
     evtSource?.close();
     evtSource = null;
   };
@@ -202,16 +346,12 @@ function renderBatchResults(result) {
   $grpPlan.textContent  = g.planMejora || '';
 }
 
-function escapeHtml(s) {
-  return String(s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-}
-
 // ---------- Consolidado ----------
 const $btnReload = $('btnReload');
 const $summary   = $('summary');
 const $tbody     = document.querySelector('#tbl tbody');
 
-// (1.B) — plegables para Por agente / Por categoría
+// (plegables) — Por agente / Por categoría
 function renderSummaryCompatible(s) {
   const isOld = s && (s.totalCalls !== undefined || s.byAgent || s.byCategory);
   const total = isOld ? (s.totalCalls ?? 0) : (s.total ?? 0);
@@ -298,7 +438,7 @@ async function loadAudits() {
       const cli   = it?.metadata?.customerName || it?.analisis?.client_name || '-';
       const nota  = it?.consolidado?.notaFinal ?? '-';
 
-      // (1.A) Link de reporte — usa reportPath si existe; si no, /audits/files/<callId>.md
+      // Link de reporte — usa reportPath si existe; si no, /audits/files/<callId>.md
       const callId = it?.metadata?.callId || '';
       let reporteHtml = '—';
       if (callId) {
@@ -338,4 +478,4 @@ async function reloadConsolidado() {
 $('btnReload')?.addEventListener('click', reloadConsolidado);
 
 // ---------- Estado inicial ----------
-showAnalyze();
+showTranscribe(); // ← ahora la vista por defecto es Transcribir

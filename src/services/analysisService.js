@@ -30,10 +30,7 @@ function keyName(x) {
 function cleanName(x = '') {
   const s = String(x).trim();
   if (!s) return '';
-  const sinHon = s
-    .replace(/^(señor(?:a)?|sr\.?|sra\.?|srta\.?|don|doña)\s+/i, '')
-    .trim();
-  return sinHon;
+  return s.replace(/^(señor(?:a)?|sr\.?|sra\.?|srta\.?|don|doña)\s+/i, '').trim();
 }
 
 /** Umbral de criticidad (por peso). Por defecto 100. */
@@ -88,8 +85,8 @@ export async function analyzeTranscriptWithMatrix({ transcript, matrix, prompt =
         'Eres un analista de calidad experto en contact center.',
         'Evalúas transcripciones con base en una MATRIZ DE CALIDAD.',
         'Respondes ÚNICAMENTE en JSON válido y en español.',
-        'Debes evaluar TODOS los atributos solicitados (no omitas ninguno).',
-        'Si no hay evidencia clara, explica la razón en "justificacion" y sigue las reglas de calibración provistas.',
+        'Evalúa lista CERRADA y en el MISMO orden que los atributos solicitados.',
+        'Cada "justificacion" debe citar o parafrasear una frase breve del audio cuando marques "cumplido": false.',
         'No inventes datos fuera de la transcripción.'
       ].join(' ') },
       ...(context?.metodologia || context?.cartera || prompt || (extraSystem && extraSystem.length) ? [{
@@ -97,9 +94,9 @@ export async function analyzeTranscriptWithMatrix({ transcript, matrix, prompt =
         content: [
           context?.metodologia ? `Metodología: ${context.metodologia}.` : '',
           context?.cartera     ? `Cartera: ${context.cartera}.`         : '',
-          prompt ? `Instrucciones de campaña: ${prompt}` : '',
+          prompt ? `Reglas/Guion de campaña:\n${prompt}` : '',
           ...(extraSystem || [])
-        ].filter(Boolean).join(' ')
+        ].filter(Boolean).join('\n')
       }] : []),
       { role: 'user', content: userContent },
     ],
@@ -115,9 +112,9 @@ export async function analyzeTranscriptWithMatrix({ transcript, matrix, prompt =
     .filter(Boolean);
   const expectedCount = expectedAttrNames.length;
 
-  // ---------- Prompt base (calibración Bogotá + nombres) ----------
+  // ---------- Prompt base (genérico; las reglas de campaña vienen por `prompt`) ----------
   const baseUser = `
-Vas a AUDITAR una transcripción contra una MATRIZ DE CALIDAD. Lee con mucha atención el campo "criterio" de cada atributo: ese texto ES LA REGLA.
+Vas a AUDITAR una transcripción contra una MATRIZ DE CALIDAD. El campo "criterio" de cada atributo es la fuente principal de verdad.
 
 MATRIZ (atributo | categoría | peso | criterio opcional):
 ${matrixAsText}
@@ -147,20 +144,11 @@ Devuelve JSON ESTRICTAMENTE con el siguiente esquema (sin comentarios):
   "sugerencias_generales": ["string", "string", "string"]
 }
 
-REGLAS DE CALIBRACIÓN (OBLIGATORIAS):
+REGLAS (OBLIGATORIAS):
 - LISTA CERRADA: Evalúa ÚNICAMENTE los atributos listados arriba. No inventes atributos ni cambies los nombres.
 - ORDEN: Mantén el MISMO orden que en "ATRIBUTOS ESPERADOS".
-- EVIDENCIA: Cada "justificacion" debe citar o parafrasear una frase breve del audio. Si no puedes citar, explica por qué.
-- CRÍTICOS (peso=100 por defecto): si NO hay evidencia explícita de CUMPLIMIENTO, marca "cumplido": false (fail-closed) y explica. Esto aplica especialmente a obligaciones legales como Ley 1581 / tratamiento de datos.
-- ESCALONAMIENTO (Bogotá): NO es un "plan de pagos". Es ofrecer un SALDO a cobrar que VA BAJANDO en escalas (p.ej. "Saldo $1.200.000 → $900.000 → $700.000"). Si solo hay cuotas/plazos, marca NO CUMPLE.
-- DESPEDIDA DE GUION: Valida lo que indique el "criterio" del atributo. Si el guion exige fórmula de despedida específica (agradecimiento + cierre cordial + identidad), debe oírse. Sin evidencia, NO CUMPLE.
-- NO HALLUCINATIONS: Si tienes dudas o la transcripción es ambigua, NO supongas cumplimiento. Marca NO CUMPLE y deja una mejora concreta.
-- PENALIZACIÓN: Si un atributo se evalúa como afectado/no cumplido, debe quedar "cumplido": false.
-
-REQUISITOS (OBLIGATORIOS):
-- "atributos" debe contener EXACTAMENTE ${expectedCount} elementos.
-- El orden DEBE seguir "ATRIBUTOS ESPERADOS".
-- "atributo" DEBE copiarse exactamente (mismos acentos).
+- EVIDENCIA: Si marcas "cumplido": false, incluye una cita o parafraseo breve del fragmento específico.
+- CRÍTICOS (según peso de la matriz): si NO hay evidencia explícita de cumplimiento, marca "cumplido": false (fail-closed) y explica. En no críticos, si no hay evidencia clara, "cumplido": true.
 - No incluyas texto fuera del JSON.
 - Si no hay evidencia clara de nombres, deja "agent_name" y/o "client_name" como cadena vacía ("").
 `.trim();
@@ -270,9 +258,7 @@ function finalizeFromLLM(json, matrix) {
     const peso = Number(row?.peso ?? row?.Peso ?? 0);
     const critico = isCriticalPeso(peso);
 
-    // Si el LLM no devolvió "cumplido", aplicamos default:
-    // - CRÍTICO -> false (fail-closed)
-    // - NO crítico -> true
+    // Default: críticos fail-closed, no críticos pass-open
     let cumplido;
     if (typeof found?.cumplido === 'boolean') {
       cumplido = found.cumplido;
@@ -331,7 +317,7 @@ Evalúa SOLO los siguientes atributos (en el MISMO orden) y devuelve ÚNICAMENTE
       "atributo": "string (copiar exactamente de la lista)",
       "categoria": "string",
       "cumplido": true,
-      "justificacion": "string",
+      "justificacion": "string (si marcas false, cita/parafrasea evidencia concreta)",
       "mejora": "string",
       "reconocimiento": "string"
     }
@@ -351,7 +337,7 @@ ${transcriptText}
       max_tokens: BATCH_TOKENS,
       response_format: { type: 'json_object' },
       messages: [
-        { role: 'system', content: 'Responde SOLO el objeto JSON con "atributos".' },
+        { role: 'system', content: 'Responde SOLO el objeto JSON con "atributos". Debe existir evidencia citada si marcas false.' },
         { role: 'user', content: batchUser }
       ],
     });

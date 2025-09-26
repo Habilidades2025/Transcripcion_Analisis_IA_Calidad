@@ -190,141 +190,178 @@ function buildBatchMarkdown(jobId, group, itemsCompact) {
   return lines.join('\n');
 }
 
+const MAX_SCRIPT_CHARS = Number(process.env.MAX_SCRIPT_CHARS || 8000);
+
 // ---- POST /batch/start
-router.post('/batch/start', upload.fields([
-  { name: 'matrix', maxCount: 1 },
-  { name: 'audios', maxCount: Number(process.env.BATCH_MAX_FILES || 2000) }
-]), async (req, res) => {
-  try {
-    if (!req.files?.matrix?.[0] || !req.files?.audios?.length) {
-      return res.status(400).json({ error: 'Adjunta "matrix" (.xlsx) y al menos un archivo en "audios"' });
-    }
-
-    // 1) Parse matriz
-    const matrixBuf = req.files.matrix[0].buffer;
-    const matrix = parseMatrixFromXlsx(matrixBuf);
-    if (!Array.isArray(matrix) || matrix.length === 0) {
-      return res.status(422).json({ error: 'Matriz inválida o vacía' });
-    }
-
-    // 2) Crear job
-    const jobId = makeJobId();
-    const job = {
-      id: jobId,
-      status: 'queued',
-      total: req.files.audios.length,
-      done: 0,
-      items: req.files.audios.map(f => ({ name: f.originalname, status: 'pending' })),
-      em: new EventEmitter(),
-      group: null
-    };
-    jobs.set(jobId, job);
-
-    // 3) Responder de una vez con el jobId (frontend abrirá el SSE)
-    res.json({ jobId });
-
-    // 4) Procesamiento en background
-    setImmediate(async () => {
-      job.status = 'running';
-      notify(job);
-
-      const language     = String(req.body.language || 'es-ES');
-      const channel      = String(req.body.channel  || 'voz');
-      const provider     = String(req.body.provider || '').trim().toLowerCase();
-      const mode         = String(req.body.mode || '').trim().toLowerCase();
-      const agentChannel = Number.isFinite(Number(req.body.agentChannel)) ? Number(req.body.agentChannel) : undefined;
-      const metodologia  = String(req.body.metodologia || '');
-      const cartera      = String(req.body.cartera || '');
-
-      const analysisPrompt =
-        (metodologia === 'cobranza' && cartera === 'carteras_bogota')
-          ? 'Analiza la auditoría de la cartera Bogotá con los criterios y etapas definidos para gestión jurídica y extrajudicial.'
-          : (metodologia === 'cobranza' && cartera === 'carteras_medellin')
-            ? 'Analiza la auditoría de la cartera Medellín siguiendo los lineamientos de negociación, objeciones y formalidad en canales.'
-            : '';
-
-      const compactList = [];
-
-      for (let i = 0; i < req.files.audios.length; i++) {
-        const f = req.files.audios[i];
-        try {
-          // a) Transcribir
-          const transcript = await transcribeAudio(
-            f.buffer,
-            f.originalname,
-            language,
-            { provider, mode, agentChannel }
-          );
-
-          // b) Analizar
-          const analysis = await analyzeTranscriptWithMatrix({
-            transcript,
-            matrix,
-            prompt: analysisPrompt,
-            context: { metodologia, cartera }
-          });
-
-          // c) Scoring
-          const scoring = scoreFromMatrix(analysis, matrix);
-
-          // d) Persistir
-          const callId = `${Date.now()}_${i + 1}`;
-          const agentName    = cleanName(analysis?.agent_name || '');
-          const customerName = cleanName(analysis?.client_name || '');
-          const audit = {
-            metadata: {
-              callId,
-              agentName:    agentName || '-',
-              customerName: customerName || '-',
-              language,
-              channel,
-              provider: provider || '(default .env)',
-              metodologia,
-              cartera,
-              timestamp: Date.now()
-            },
-            transcript,
-            analisis: {
-              ...analysis,
-              agent_name: agentName || '',
-              client_name: customerName || ''
-            },
-            consolidado: scoring
-          };
-          saveAudit(audit);
-
-          // e) compact para front
-          const compact = compactAuditForFront(audit);
-          job.items[i] = { name: f.originalname, status: 'done', callId, meta: compact };
-          compactList.push(compact);
-
-          job.done += 1;
-          notify(job);
-        } catch (err) {
-          job.items[i] = { name: f.originalname, status: 'error', error: err?.message || String(err) };
-          job.done += 1;
-          notify(job);
-        }
+router.post(
+  '/batch/start',
+  upload.fields([
+    { name: 'matrix',  maxCount: 1 },
+    { name: 'audios',  maxCount: Number(process.env.BATCH_MAX_FILES || 2000) },
+    { name: 'script',  maxCount: 1 } // ✅ NUEVO: archivo de guion opcional
+  ]),
+  async (req, res) => {
+    try {
+      if (!req.files?.matrix?.[0] || !req.files?.audios?.length) {
+        return res.status(400).json({ error: 'Adjunta "matrix" (.xlsx) y al menos un archivo en "audios"' });
       }
 
-      // Resumen grupal + Reporte de bloque
-      job.group = buildGroupSummary(compactList);
+      // 1) Parse matriz
+      const matrixBuf = req.files.matrix[0].buffer;
+      const matrix = parseMatrixFromXlsx(matrixBuf);
+      if (!Array.isArray(matrix) || matrix.length === 0) {
+        return res.status(422).json({ error: 'Matriz inválida o vacía' });
+      }
+
+      // 1.b) (opcional) Leer GUION
+      let scriptText = '';
       try {
-        ensureDir(REPORTS_BATCH_DIR);
-        const md = buildBatchMarkdown(job.id, job.group, compactList);
-        fs.writeFileSync(path.join(REPORTS_BATCH_DIR, `${job.id}.md`), md, 'utf-8');
-      } catch (e) {
-        console.warn('[BATCH][report][WARN]', e?.message || e);
-      }
+        const buf = req.files?.script?.[0]?.buffer;
+        if (buf && buf.length) {
+          // asumimos texto plano / markdown; se trunca por seguridad
+          scriptText = buf.toString('utf-8').replace(/\s+/g, ' ').trim();
+          if (scriptText.length > MAX_SCRIPT_CHARS) {
+            scriptText = scriptText.slice(0, MAX_SCRIPT_CHARS) + ' ...';
+          }
+        }
+      } catch { /* si falla, seguimos sin guion */ }
 
-      job.status = 'done';
-      notify(job);
-    });
-  } catch (e) {
-    console.error('[BATCH][start][ERROR]', e);
-    return res.status(500).json({ error: e?.message || String(e) });
+      // 2) Crear job
+      const jobId = makeJobId();
+      const job = {
+        id: jobId,
+        status: 'queued',
+        total: req.files.audios.length,
+        done: 0,
+        items: req.files.audios.map(f => ({ name: f.originalname, status: 'pending' })),
+        em: new EventEmitter(),
+        group: null
+      };
+      jobs.set(jobId, job);
+
+      // 3) Responder de una vez con el jobId (frontend abrirá el SSE)
+      res.json({ jobId });
+
+      // 4) Procesamiento en background
+      setImmediate(async () => {
+        job.status = 'running';
+        notify(job);
+
+        const language     = String(req.body.language || 'es-ES');
+        const channel      = String(req.body.channel  || 'voz');
+        const provider     = String(req.body.provider || '').trim().toLowerCase();
+        const mode         = String(req.body.mode || '').trim().toLowerCase();
+        const agentChannel = Number.isFinite(Number(req.body.agentChannel)) ? Number(req.body.agentChannel) : undefined;
+        const metodologia  = String(req.body.metodologia || '');
+        const cartera      = String(req.body.cartera || '');
+
+        // Prompt base por campaña
+        const baseCampaignPrompt =
+          (metodologia === 'cobranza' && cartera === 'carteras_bogota')
+            ? [
+                'Analiza la auditoría para Carteras Propias Bogotá.',
+                'Reglas específicas:',
+                '- **Cobro escalonado (CUMPLE)** solo si se ofrece primero un VALOR CAPITAL (saldo/valor total o monto alto) y luego se propone al menos UNA alternativa con DESCUENTO explícito sobre ese capital (porcentaje o cifra menor).',
+                '- No penalizar por mencionar “plan de pagos/cuotas” si NO hay evidencia de que omitió el valor capital primero.',
+                '- **Debate objeciones**: considerar las situaciones típicas del cliente: Salud, Desempleo, Disminución de ingresos, Ya pagué a la entidad. CUMPLE si el agente identifica la situación concreta y responde con argumentos/beneficios alineados (al menos 1 respuesta pertinente).',
+              ].join('\n')
+            : (metodologia === 'cobranza' && cartera === 'carteras_medellin')
+              ? 'Analiza la auditoría de la cartera Medellín siguiendo lineamientos de negociación, objeciones y formalidad.'
+              : '';
+
+        // Adjuntar guion al prompt (si viene)
+        const promptParts = [baseCampaignPrompt];
+        if (scriptText) {
+          promptParts.push(
+            'Guion de la campaña (extracto, usar para validar "uso de guion" y consistencia de ofrecimiento):\n' +
+            scriptText
+          );
+        }
+        const finalPrompt = promptParts.filter(Boolean).join('\n\n');
+
+        const compactList = [];
+
+        for (let i = 0; i < req.files.audios.length; i++) {
+          const f = req.files.audios[i];
+          try {
+            // a) Transcribir
+            const transcript = await transcribeAudio(
+              f.buffer,
+              f.originalname,
+              language,
+              { provider, mode, agentChannel }
+            );
+
+            // b) Analizar (inyectando prompt con guion si existe)
+            const analysis = await analyzeTranscriptWithMatrix({
+              transcript,
+              matrix,
+              prompt: finalPrompt,
+              context: { metodologia, cartera }
+            });
+
+            // c) Scoring
+            const scoring = scoreFromMatrix(analysis, matrix);
+
+            // d) Persistir
+            const callId = `${Date.now()}_${i + 1}`;
+            const agentName    = cleanName(analysis?.agent_name || '');
+            const customerName = cleanName(analysis?.client_name || '');
+            const audit = {
+              metadata: {
+                callId,
+                agentName:    agentName || '-',
+                customerName: customerName || '-',
+                language,
+                channel,
+                provider: provider || '(default .env)',
+                metodologia,
+                cartera,
+                timestamp: Date.now()
+              },
+              transcript,
+              analisis: {
+                ...analysis,
+                agent_name:  agentName || '',
+                client_name: customerName || ''
+              },
+              consolidado: scoring
+            };
+            saveAudit(audit);
+
+            // e) compact para front
+            const compact = compactAuditForFront(audit);
+            job.items[i] = { name: f.originalname, status: 'done', callId, meta: compact };
+            compactList.push(compact);
+
+            job.done += 1;
+            notify(job);
+          } catch (err) {
+            job.items[i] = { name: f.originalname, status: 'error', error: err?.message || String(err) };
+            job.done += 1;
+            notify(job);
+          }
+        }
+
+        // Resumen grupal + Reporte de bloque
+        job.group = buildGroupSummary(compactList);
+        try {
+          ensureDir(REPORTS_BATCH_DIR);
+          const md = buildBatchMarkdown(job.id, job.group, compactList);
+          fs.writeFileSync(path.join(REPORTS_BATCH_DIR, `${job.id}.md`), md, 'utf-8');
+        } catch (e) {
+          console.warn('[BATCH][report][WARN]', e?.message || e);
+        }
+
+        job.status = 'done';
+        notify(job);
+      });
+    } catch (e) {
+      console.error('[BATCH][start][ERROR]', e);
+      return res.status(500).json({ error: e?.message || String(e) });
+    }
   }
-});
+);
 
 // ---- SSE /batch/progress/:jobId
 router.get('/batch/progress/:jobId', (req, res) => {
