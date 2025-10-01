@@ -230,7 +230,8 @@ REGLAS (OBLIGATORIAS):
 - LISTA CERRADA: Evalúa ÚNICAMENTE los atributos listados arriba. No inventes atributos ni cambies los nombres.
 - ORDEN: Mantén el MISMO orden que en "ATRIBUTOS ESPERADOS".
 - EVIDENCIA: Si marcas "cumplido": false, incluye una cita o parafraseo breve del fragmento específico.
-- CRÍTICOS (según REGLAS de criticidad del sistema): si NO hay evidencia explícita de cumplimiento, marca "cumplido": false (fail-closed) y explica. En NO críticos, si no hay evidencia clara, mantén "cumplido": true (pass-open) con mejora sugerida.
+- CRÍTICOS: marca "cumplido": false SOLO si hay evidencia clara de INCUMPLIMIENTO o si el criterio exige una mención/acción explícita que NO aparece en toda la transcripción. Si la evidencia es ambigua/parcial, marca true y agrega mejora.
+- NO CRÍTICOS: si no hay evidencia clara de incumplimiento, marca "cumplido": true y usa "mejora" para recomendaciones.
 - No incluyas texto fuera del JSON.
 - Si no hay evidencia clara de nombres, deja "agent_name" y/o "client_name" como cadena vacía ("").
 `.trim();
@@ -310,10 +311,8 @@ Devuelve el MISMO JSON solicitado antes (con TODOS los atributos y en el mismo o
       categoria: String(row?.categoria ?? row?.Categoria ?? ''),
       peso: Number(row?.peso ?? row?.Peso ?? 0),
       critico: isCriticalRow(row),
-      cumplido: isCriticalRow(row) ? false : true, // críticos -> false, no críticos -> true
-      justificacion: isCriticalRow(row)
-        ? 'No se encontró evidencia explícita de cumplimiento (fail-closed por criticidad).'
-        : 'No se evidencia incumplimiento',
+      cumplido: true, // fallback conservador: no derribar notas sin análisis
+      justificacion: 'No se evidencia incumplimiento',
       mejora: null,
       reconocimiento: null
     }));
@@ -348,20 +347,29 @@ function finalizeFromLLM(json, matrix, transcriptText = '') {
     const peso = Number(row?.peso ?? row?.Peso ?? 0);
     const critico = isCriticalRow(row);
 
-    // Default: críticos fail-closed, no críticos pass-open
+    // Default ahora: pass-open. Solo respetamos false si viene claro y con evidencia.
     let cumplido;
     if (typeof found?.cumplido === 'boolean') {
       cumplido = found.cumplido;
     } else {
-      cumplido = critico ? false : true;
+      cumplido = true;
+    }
+
+    // Si viene false sin evidencia mínima, lo elevamos a true.
+    if (cumplido === false) {
+      const j = (found?.justificacion || '').trim();
+      const tieneEvidencia = j.length >= 25 || /["“”]|cita:|frase/i.test(j);
+      if (!tieneEvidencia) {
+        cumplido = true;
+      }
     }
 
     const justif = (found?.justificacion || '').trim();
     const defaultJustif = cumplido
       ? 'No se evidencia incumplimiento'
       : (critico
-          ? 'No se encontró evidencia explícita de cumplimiento (fail-closed por criticidad).'
-          : 'Incumplimiento detectado o evidencia insuficiente.');
+          ? 'Incumplimiento crítico con evidencia citada.'
+          : 'Incumplimiento detectado con evidencia citada.');
     const mejora = (found?.mejora ?? (cumplido ? null : 'Definir acciones concretas para cumplir el criterio.'));
 
     full.push({
@@ -478,15 +486,23 @@ ${transcriptText}
     if (typeof found?.cumplido === 'boolean') {
       cumplido = found.cumplido;
     } else {
-      cumplido = critico ? false : true;
+      cumplido = true; // pass-open por defecto
+    }
+
+    if (cumplido === false) {
+      const j = (found?.justificacion || '').trim();
+      const tieneEvidencia = j.length >= 25 || /["“”]|cita:|frase/i.test(j);
+      if (!tieneEvidencia) {
+        cumplido = true;
+      }
     }
 
     const justif = (found?.justificacion || '').trim();
     const defaultJustif = cumplido
       ? 'No se evidencia incumplimiento'
       : (critico
-          ? 'No se encontró evidencia explícita de cumplimiento (fail-closed por criticidad).'
-          : 'Incumplimiento detectado o evidencia insuficiente.');
+          ? 'Incumplimiento crítico con evidencia citada.'
+          : 'Incumplimiento detectado con evidencia citada.');
     const mejora = (found?.mejora ?? (cumplido ? null : 'Definir acciones concretas para cumplir el criterio.'));
 
     return {
