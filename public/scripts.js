@@ -4,7 +4,6 @@ function setOut(obj) { const out = $('out'); if (out) out.textContent = typeof o
 function basename(p) { if (!p) return null; return p.toString().split(/[\\/]/).pop(); }
 function isHttpOrRoot(href) { return typeof href === 'string' && (href.startsWith('http://') || href.startsWith('https://') || href.startsWith('/')); }
 function filenameFromContentDisposition(h) {
-  // intenta extraer filename="..."
   if (!h) return null;
   const m = /filename\*?=(?:UTF-8''|")?([^";]+)(?:")?/i.exec(h);
   if (m && m[1]) {
@@ -23,22 +22,27 @@ function downloadBlob(blob, filename) {
 function escapeHtml(s) {
   return String(s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 }
+// Formatea una alerta de fraude {tipo,cita,riesgo} con 🚫🚫
+function formatFraudItem(f) {
+  if (!f) return '';
+  if (typeof f === 'string') return `🚫🚫 ${escapeHtml(f)}`;
+  const tipo   = String(f.tipo || '').replace(/_/g, ' ');
+  const riesgo = (f.riesgo || 'alto').toUpperCase();
+  const cita   = String(f.cita || '').trim();
+  return `🚫🚫 [${riesgo}] ${escapeHtml(tipo)}${cita ? ` — “${escapeHtml(cita)}”` : ''}`;
+}
 
 // ---------- Tabs ----------
 const $tabTranscribe  = $('tabTranscribe');
-const $tabAnalyze      = $('tabAnalyze');
-const $tabConsolidado  = $('tabConsolidado');
+const $tabAnalyze     = $('tabAnalyze');
+const $tabConsolidado = $('tabConsolidado');
 
 const $viewTranscribe  = $('viewTranscribe');
 const $viewAnalyze     = $('viewAnalyze');
 const $viewConsolidado = $('viewConsolidado');
 
 function setTabClasses(active) {
-  const map = {
-    transcribe: $tabTranscribe,
-    analyze: $tabAnalyze,
-    consolidado: $tabConsolidado
-  };
+  const map = { transcribe: $tabTranscribe, analyze: $tabAnalyze, consolidado: $tabConsolidado };
   Object.entries(map).forEach(([k, btn]) => {
     if (!btn) return;
     btn.className = (k === active) ? 'primary' : 'muted';
@@ -70,7 +74,7 @@ $tabTranscribe?.addEventListener('click', showTranscribe);
 $tabAnalyze?.addEventListener('click', showAnalyze);
 $tabConsolidado?.addEventListener('click', showConsolidado);
 
-// ---------- TRANSCRIBIR (nuevo módulo) ----------
+// ---------- TRANSCRIBIR ----------
 const $formTx      = $('formTranscribe');
 const $txAudios    = $('txAudios');
 const $txProvider  = $('txProvider');
@@ -79,25 +83,20 @@ const $txMode      = $('txMode');
 const $txAgentChan = $('txAgentChannel');
 const $txBtn       = $('btnTranscribe');
 const $txStatus    = $('txStatus');
-const $txDownload  = $('txDownloadLink'); // ancla para mostrar el link final
+const $txDownload  = $('txDownloadLink');
 
 $formTx?.addEventListener('submit', async (e) => {
   e.preventDefault();
-  if (!$txAudios?.files?.length) {
-    alert('Adjunta al menos un audio.');
-    return;
-  }
+  if (!$txAudios?.files?.length) { alert('Adjunta al menos un audio.'); return; }
   const files = Array.from($txAudios.files);
   const many = files.length > 1;
 
-  // reset UI
   if ($txStatus)  $txStatus.textContent = '';
   if ($txDownload) { $txDownload.style.display = 'none'; $txDownload.removeAttribute('href'); $txDownload.removeAttribute('download'); }
   if ($txBtn) { $txBtn.disabled = true; $txBtn.textContent = 'Procesando...'; }
 
   try {
     if (many) {
-      // ZIP
       const fd = new FormData();
       files.forEach(f => fd.append('audios', f));
       if ($txProvider?.value)   fd.append('provider', $txProvider.value);
@@ -107,12 +106,8 @@ $formTx?.addEventListener('submit', async (e) => {
 
       if ($txStatus) $txStatus.textContent = `Transcribiendo ${files.length} audios... (esto puede tardar)`;
       const resp = await fetch('/transcribe-zip', { method: 'POST', body: fd });
-      if (!resp.ok) {
-        const err = await safeJson(resp);
-        throw new Error(err?.error || `Error HTTP ${resp.status}`);
-      }
+      if (!resp.ok) { const err = await safeJson(resp); throw new Error(err?.error || `Error HTTP ${resp.status}`); }
       const blob = await resp.blob();
-      // filename
       const cd = resp.headers.get('Content-Disposition');
       const suggest = filenameFromContentDisposition(cd) || 'transcripciones.zip';
       downloadBlob(blob, suggest);
@@ -120,14 +115,10 @@ $formTx?.addEventListener('submit', async (e) => {
       if ($txStatus) $txStatus.textContent = `¡Listo! Se descargó ${suggest}`;
       if ($txDownload) {
         const url = URL.createObjectURL(blob);
-        $txDownload.href = url;
-        $txDownload.download = suggest;
-        $txDownload.style.display = '';
-        // liberamos URL luego de un rato si el usuario no hace click
+        $txDownload.href = url; $txDownload.download = suggest; $txDownload.style.display = '';
         setTimeout(() => URL.revokeObjectURL(url), 60_000);
       }
     } else {
-      // 1 archivo -> TXT
       const fd = new FormData();
       fd.append('audio', files[0]);
       if ($txProvider?.value)   fd.append('provider', $txProvider.value);
@@ -137,26 +128,17 @@ $formTx?.addEventListener('submit', async (e) => {
 
       if ($txStatus) $txStatus.textContent = `Transcribiendo ${files[0].name}...`;
       const resp = await fetch('/transcribe-txt', { method: 'POST', body: fd });
-      if (!resp.ok) {
-        const err = await safeJson(resp);
-        throw new Error(err?.error || `Error HTTP ${resp.status}`);
-      }
+      if (!resp.ok) { const err = await safeJson(resp); throw new Error(err?.error || `Error HTTP ${resp.status}`); }
       const blob = await resp.blob();
-      // sugerir nombre .txt
       const cd = resp.headers.get('Content-Disposition');
       let suggest = filenameFromContentDisposition(cd);
-      if (!suggest) {
-        const base = (files[0].name || 'transcripcion').replace(/\.[^.]+$/, '');
-        suggest = `${base}.txt`;
-      }
+      if (!suggest) { const base = (files[0].name || 'transcripcion').replace(/\.[^.]+$/, ''); suggest = `${base}.txt`; }
       downloadBlob(blob, suggest);
 
       if ($txStatus) $txStatus.textContent = `¡Listo! Se descargó ${suggest}`;
       if ($txDownload) {
         const url = URL.createObjectURL(blob);
-        $txDownload.href = url;
-        $txDownload.download = suggest;
-        $txDownload.style.display = '';
+        $txDownload.href = url; $txDownload.download = suggest; $txDownload.style.display = '';
         setTimeout(() => URL.revokeObjectURL(url), 60_000);
       }
     }
@@ -169,15 +151,14 @@ $formTx?.addEventListener('submit', async (e) => {
   }
 });
 
-async function safeJson(resp) {
-  try { return await resp.json(); } catch { return null; }
-}
+async function safeJson(resp) { try { return await resp.json(); } catch { return null; } }
 
 // ---------- Analizar (BATCH) ----------
-const $formBatch  = $('formBatch');
-const $matrix     = $('matrix');
-const $audios     = $('audios');
-const $provider   = $('provider');
+const $formBatch   = $('formBatch');
+const $matrix      = $('matrix');
+const $audios      = $('audios');
+const $provider    = $('provider');
+const $scriptFile  = $('scriptFile'); // input opcional para guion
 
 // Progreso
 const $progressCard = $('progressCard');
@@ -186,9 +167,9 @@ const $barProgress  = $('barProgress');
 const $listProgress = $('listProgress');
 
 // Resultados
-const $resultsCard  = $('resultsCard');
-const $detIndividual= $('detIndividual');
-const $countInd     = $('countInd');
+const $resultsCard    = $('resultsCard');
+const $detIndividual  = $('detIndividual');
+const $countInd       = $('countInd');
 const $individualList = $('individualList');
 
 const $metodologia  = $('metodologia');
@@ -203,7 +184,10 @@ const $grpCrit    = $('grpCrit');
 const $grpNoCrit  = $('grpNoCrit');
 const $grpPlan    = $('grpPlan');
 
-// Dependiente: Metodología -> Cartera
+// Fraude (grupo)
+const $grpFraudeCard = $('grpFraudeCard');                         // contenedor (se oculta si no hay alertas)
+const $grpFraudeList = $('grpFraudeList') || $('grpFraude');       // <ul>
+
 $metodologia?.addEventListener('change', function () {
   const metodologia = this.value;
   if ($cartera) $cartera.innerHTML = '<option value="">Selecciona cartera</option>';
@@ -227,31 +211,26 @@ let evtSource = null;
 
 $formBatch?.addEventListener('submit', async (e) => {
   e.preventDefault();
-  if (!$matrix?.files?.length || !$audios?.files?.length) {
-    alert('Adjunta una matriz y al menos un audio.');
-    return;
-  }
+  if (!$matrix?.files?.length || !$audios?.files?.length) { alert('Adjunta una matriz y al menos un audio.'); return; }
 
-  // Reset UI
   $progressCard.style.display = '';
   $resultsCard.style.display  = 'none';
   $listProgress.innerHTML     = '';
   $lblProgress.textContent    = `0 / ${$audios.files.length}`;
   $barProgress.style.width    = '0%';
 
-  // Build formdata
   const fd = new FormData();
   fd.append('matrix', $matrix.files[0]);
   Array.from($audios.files).forEach(f => fd.append('audios', f));
-  if ($provider?.value)   fd.append('provider', $provider.value);
-  if ($metodologia?.value)fd.append('metodologia', $metodologia.value);
-  if ($cartera?.value)    fd.append('cartera', $cartera.value);
+  if ($provider?.value)    fd.append('provider', $provider.value);
+  if ($metodologia?.value) fd.append('metodologia', $metodologia.value);
+  if ($cartera?.value)     fd.append('cartera', $cartera.value);
+  if ($scriptFile?.files?.[0]) fd.append('script', $scriptFile.files[0]);
 
   try {
     const r = await fetch('/batch/start', { method: 'POST', body: fd });
     const j = await r.json();
     if (!r.ok) { alert(j?.error || 'No se pudo iniciar el lote'); return; }
-
     startSSE(j.jobId);
   } catch (err) {
     alert('Error iniciando lote: ' + (err?.message || err));
@@ -265,15 +244,11 @@ function startSSE(jobId) {
     const data = JSON.parse(ev.data);
     updateProgressUI(data);
     if (data.status === 'done') {
-      evtSource.close();
-      evtSource = null;
+      evtSource.close(); evtSource = null;
       loadBatchResult(jobId);
     }
   });
-  evtSource.onerror = () => {
-    evtSource?.close();
-    evtSource = null;
-  };
+  evtSource.onerror = () => { evtSource?.close(); evtSource = null; };
 }
 
 function updateProgressUI(p) {
@@ -283,7 +258,6 @@ function updateProgressUI(p) {
   const pct = total ? Math.round((done / total) * 100) : 0;
   $barProgress.style.width = `${pct}%`;
 
-  // Lista de archivos con estado
   const frag = document.createDocumentFragment();
   (p.items || []).forEach((it, idx) => {
     const d = document.createElement('div');
@@ -308,27 +282,45 @@ async function loadBatchResult(jobId) {
 }
 
 function renderBatchResults(result) {
-  // Mostrar tarjeta de resultados
   $resultsCard.style.display = '';
 
-  // Individuales (colapsables, no se expanden por defecto)
   const items = (result.items || []).filter(it => it.status === 'done' && it.meta);
   $countInd.textContent = String(items.length);
 
   $individualList.innerHTML = '';
   items.forEach((it) => {
     const m = it.meta;
+
+    // Normaliza alertas (objetos o strings)
+    let alertas = [];
+    if (Array.isArray(m?.alertasFraude)) alertas = m.alertasFraude;
+    else if (Array.isArray(m?.fraudeAlertas)) alertas = m.fraudeAlertas;
+    else if (Array.isArray(m?.fraude?.alertas)) alertas = m.fraude.alertas;
+
+    const hasFraude = Array.isArray(alertas) && alertas.length > 0;
+
     const det = document.createElement('details');
     det.innerHTML = `
       <summary><b>${m.agente || '-'}</b> — ${m.cliente || '-'} · <span class="pill">Nota: ${m.nota ?? '-'}</span> · <small>${m.callId}</small></summary>
       <div style="padding:8px 12px">
         <p><b>Resumen:</b> ${m.resumen ? m.resumen : '(sin resumen)'}</p>
+
         <p><b>Hallazgos:</b></p>
         <ul>${(m.hallazgos || []).map(h => `<li>${escapeHtml(h)}</li>`).join('')}</ul>
+
         <p><b>Afectados (críticos):</b> ${m.afectadosCriticos?.join(', ') || '—'}</p>
         <p><b>Afectados (no críticos):</b> ${m.afectadosNoCriticos?.join(', ') || '—'}</p>
+
         <p><b>Sugerencias:</b></p>
         <ul>${(m.sugerencias || []).map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ul>
+
+        ${hasFraude ? `
+          <div class="fraud-box">
+            <div class="fraud-title">Alertas de fraude</div>
+            <ul class="fraud-list">
+              ${alertas.map(a => `<li>${formatFraudItem(a)}</li>`).join('')}
+            </ul>
+          </div>` : ``}
       </div>
     `;
     $individualList.appendChild(det);
@@ -340,10 +332,25 @@ function renderBatchResults(result) {
   $grpAvg.textContent     = String(g.promedio ?? 0);
   $grpResumen.textContent = g.resumen || '';
 
-  $grpHall.innerHTML = (g.topHallazgos || []).map(h => `<li>${escapeHtml(h)}</li>`).join('') || '<li>—</li>';
-  $grpCrit.textContent  = (g.atributosCriticos || []).join(', ') || '—';
-  $grpNoCrit.textContent= (g.atributosNoCriticos || []).join(', ') || '—';
-  $grpPlan.textContent  = g.planMejora || '';
+  $grpHall.innerHTML     = (g.topHallazgos || []).map(h => `<li>${escapeHtml(h)}</li>`).join('') || '<li>—</li>';
+  $grpCrit.textContent   = (g.atributosCriticos || []).join(', ') || '—';
+  $grpNoCrit.textContent = (g.atributosNoCriticos || []).join(', ') || '—';
+  $grpPlan.textContent   = g.planMejora || '';
+
+  // Fraude (grupo) — acepta varias formas
+  let topFraude = g.fraudeAlertasTop || g.topFraude || g.fraude || [];
+  if (!Array.isArray(topFraude)) topFraude = [];
+
+  const groupHasFraud = topFraude.length > 0;
+
+  if ($grpFraudeCard) {
+    $grpFraudeCard.style.display = groupHasFraud ? '' : 'none';
+  }
+  if ($grpFraudeList) {
+    $grpFraudeList.innerHTML = groupHasFraud
+      ? topFraude.map(x => `<li>${formatFraudItem(x)}</li>`).join('')
+      : '';
+  }
 }
 
 // ---------- Consolidado ----------
@@ -363,7 +370,6 @@ function renderSummaryCompatible(s) {
     <div class="pill">Promedio: <b>${promTxt}</b></div>
   `;
 
-  // ---- Por agente (plegable)
   html += `
     <details id="secPorAgente" open>
       <summary style="font-weight:600; cursor:pointer;">Por agente</summary>
@@ -384,7 +390,6 @@ function renderSummaryCompatible(s) {
   }
   html += `</div></details>`;
 
-  // ---- Por categoría (plegable)
   html += `
     <details id="secPorCategoria">
       <summary style="font-weight:600; cursor:pointer;">Por categoría</summary>
@@ -438,7 +443,6 @@ async function loadAudits() {
       const cli   = it?.metadata?.customerName || it?.analisis?.client_name || '-';
       const nota  = it?.consolidado?.notaFinal ?? '-';
 
-      // Link de reporte — usa reportPath si existe; si no, /audits/files/<callId>.md
       const callId = it?.metadata?.callId || '';
       let reporteHtml = '—';
       if (callId) {
@@ -472,10 +476,8 @@ async function loadAudits() {
   }
 }
 
-async function reloadConsolidado() {
-  await Promise.all([loadSummary(), loadAudits()]);
-}
+async function reloadConsolidado() { await Promise.all([loadSummary(), loadAudits()]); }
 $('btnReload')?.addEventListener('click', reloadConsolidado);
 
 // ---------- Estado inicial ----------
-showTranscribe(); // ← ahora la vista por defecto es Transcribir
+showTranscribe();

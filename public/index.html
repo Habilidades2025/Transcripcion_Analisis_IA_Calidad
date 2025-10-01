@@ -35,29 +35,6 @@
           <option value="openai">OpenAI</option>
         </select>
       </div>
-
-      <!--<div class="row">
-        <label>Idioma</label>
-        <select id="txLang" name="language">
-          <option value="es-ES" selected>es-ES</option>
-          <option value="es">es</option>
-          <option value="en">en</option> 
-        </select>
-      </div>-->
-
-      <!-- Opcional: solo si usas canal de agente/estéreo -->
-      <!--<div class="row">
-        <label>Modo</label>
-        <select id="txMode" name="mode">
-          <option value="">Auto</option>
-          <option value="mono">Mono</option>
-          <option value="stereo">Stereo (dos canales)</option>
-        </select>
-      </div>-->
-      <!--<div class="row">
-        <label>Canal del agente (0/1)</label>
-        <input id="txAgentChannel" name="agentChannel" type="number" min="0" max="1" placeholder="(opcional)" />
-      </div>-->
       <div>  </div>
       <div class="row">
         <button id="btnTranscribe" class="primary" type="submit">Transcribir</button>
@@ -87,7 +64,7 @@
 
       <div class="field">
         <label for="script">Guion de la campaña (.txt / .md, opcional)</label>
-        <input id="script" name="script" type="file" accept=".txt,.md,.pdf" required>
+        <input id="script" name="script" type="file" accept=".txt,.md,.pdf">
         <small>Si lo adjuntas, se validará el uso del guion y las políticas específicas.</small>
       </div>
 
@@ -141,11 +118,13 @@
 
       <h4>Hallazgos más comunes</h4>
       <ul id="grpHall"></ul>
-
       <h4>Atributos afectados</h4>
       <p><b>Críticos:</b> <span id="grpCrit">—</span></p>
       <p><b>No críticos:</b> <span id="grpNoCrit">—</span></p>
-
+      <div id="grpFraudeCard"class="fraud-box">
+        <div class="fraud-title">Alertas de fraude (grupo)</div>
+        <ul id="grpFraudeList" class="fraud-list"></ul>
+      </div>
       <h4>Plan de mejora</h4>
       <pre id="grpPlan" style="white-space:pre-wrap"></pre>
     </fieldset>

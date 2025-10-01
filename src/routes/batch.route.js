@@ -59,7 +59,7 @@ function isCritical(attr) {
   return Number.isFinite(peso) && peso >= thr;
 }
 
-// Compacta lo que enviaremos al front por cada audit (sin transcripción)
+// Compacta lo que enviaremos al front (sin transcripción completa)
 function compactAuditForFront(audit) {
   const afectNoCrit = [];
   const afectCrit   = [];
@@ -69,6 +69,17 @@ function compactAuditForFront(audit) {
       (isCritical(a) ? afectCrit : afectNoCrit).push(a.atributo || a.nombre || '(sin nombre)');
     }
   }
+
+  // Alertas fraude -> texto breve para UI
+  const alertasFraude = Array.isArray(audit?.analisis?.fraude?.alertas)
+    ? audit.analisis.fraude.alertas.map(x => {
+        const tipo = String(x?.tipo || '').replace(/_/g, ' ');
+        const riesgo = String(x?.riesgo || 'alto');
+        const cita = String(x?.cita || '').trim();
+        return `[${riesgo}] ${tipo}${cita ? ` — "${cita}"` : ''}`;
+      })
+    : [];
+
   return {
     callId: audit?.metadata?.callId || '',
     timestamp: audit?.metadata?.timestamp || Date.now(),
@@ -79,11 +90,12 @@ function compactAuditForFront(audit) {
     hallazgos: Array.isArray(audit?.analisis?.hallazgos) ? audit.analisis.hallazgos : [],
     sugerencias: Array.isArray(audit?.analisis?.sugerencias_generales) ? audit.analisis.sugerencias_generales : [],
     afectadosNoCriticos: afectNoCrit,
-    afectadosCriticos: afectCrit
+    afectadosCriticos: afectCrit,
+    alertasFraude
   };
 }
 
-// Calcula resumen grupal del bloque + plan de mejora agregado
+// Calcula resumen grupal del bloque + plan de mejora + TOP fraude
 function buildGroupSummary(itemsCompact) {
   const total = itemsCompact.length || 0;
   const promedio = total ? Math.round(itemsCompact.reduce((acc, it) => acc + toNum(it.nota), 0) / total) : 0;
@@ -93,12 +105,20 @@ function buildGroupSummary(itemsCompact) {
   const sugFreq  = new Map();
   const critMap  = new Map();
   const noCritMap= new Map();
+  // NUEVO: fraude
+  const fraudeMap = new Map();
 
   for (const it of itemsCompact) {
     (it.hallazgos || []).forEach(h => hallFreq.set(h, (hallFreq.get(h) || 0) + 1));
     (it.sugerencias || []).forEach(s => sugFreq.set(s, (sugFreq.get(s) || 0) + 1));
     (it.afectadosCriticos || []).forEach(a => critMap.set(a, (critMap.get(a) || 0) + 1));
     (it.afectadosNoCriticos || []).forEach(a => noCritMap.set(a, (noCritMap.get(a) || 0) + 1));
+    // Acumula alertas de fraude (ya vienen como strings formateados)
+    (it.alertasFraude || []).forEach(f => {
+      const k = String(f).trim();
+      if (!k) return;
+      fraudeMap.set(k, (fraudeMap.get(k) || 0) + 1);
+    });
   }
 
   const top = (m, n = 10) => Array.from(m.entries())
@@ -108,6 +128,7 @@ function buildGroupSummary(itemsCompact) {
   const topSugerencias = top(sugFreq, 10);
   const topCriticos    = top(critMap, 10);
   const topNoCriticos  = top(noCritMap, 10);
+  const fraudeAlertasTop = top(fraudeMap, 10); // ← NUEVO
 
   const resumenGrupo = [
     `Se auditaron ${total} llamadas.`,
@@ -115,11 +136,14 @@ function buildGroupSummary(itemsCompact) {
     topCriticos.length
       ? `Atributos críticos más afectados: ${topCriticos.slice(0, 5).join(', ')}.`
       : `Sin atributos críticos recurrentes.`,
-  ].join(' ');
+    fraudeAlertasTop.length
+      ? `Se detectaron alertas de posible fraude en varias llamadas (ver Top).`
+      : ''
+  ].filter(Boolean).join(' ');
 
   const planMejora = [
     (topSugerencias.length ? `Refuerzo general sugerido: ${topSugerencias.slice(0,5).join(' · ')}.` : ''),
-    (topCriticos.length ? `Enfoque inmediato en atributos críticos: ${topCriticos.slice(0,5).join(', ')}.` : ''),
+    (topCriticos.length ? `Enfoque inmediato en atributos críticos: ${topCriticos.slice(0,5).join(', ')}.` : '')
   ].filter(Boolean).join('\n');
 
   return {
@@ -129,7 +153,9 @@ function buildGroupSummary(itemsCompact) {
     topHallazgos,
     atributosCriticos: topCriticos.map(s => s.replace(/\s+\(\d+\)$/, '')),
     atributosNoCriticos: topNoCriticos.map(s => s.replace(/\s+\(\d+\)$/, '')),
-    planMejora
+    planMejora,
+    // NUEVO: se envía al front
+    fraudeAlertasTop
   };
 }
 
@@ -164,6 +190,12 @@ function buildBatchMarkdown(jobId, group, itemsCompact) {
     for (const a of group.atributosNoCriticos) lines.push(`- ${a}`);
     lines.push('');
   }
+  // NUEVO: sección de fraude grupal
+  if ((group.fraudeAlertasTop || []).length) {
+    lines.push('## Alertas de fraude (grupo)');
+    for (const f of group.fraudeAlertasTop) lines.push(`- ${f}`);
+    lines.push('');
+  }
   lines.push('## Detalle por Llamada (resumen breve)');
   for (const it of itemsCompact) {
     const fecha = it.timestamp ? new Date(it.timestamp).toLocaleString() : '';
@@ -185,6 +217,8 @@ function buildBatchMarkdown(jobId, group, itemsCompact) {
     const c  = (it.afectadosCriticos || []).join(', ');
     lines.push(`**Afectados no críticos:** ${nc || '—'}`);
     lines.push(`**Afectados críticos:** ${c || '—'}`);
+    const af = (it.alertasFraude || []).join(' • ');
+    lines.push(`**Alertas de fraude:** ${af || '—'}`);
     lines.push('');
   }
   return lines.join('\n');
@@ -198,7 +232,7 @@ router.post(
   upload.fields([
     { name: 'matrix',  maxCount: 1 },
     { name: 'audios',  maxCount: Number(process.env.BATCH_MAX_FILES || 2000) },
-    { name: 'script',  maxCount: 1 } // ✅ NUEVO: archivo de guion opcional
+    { name: 'script',  maxCount: 1 } // archivo de guion opcional
   ]),
   async (req, res) => {
     try {
@@ -213,18 +247,17 @@ router.post(
         return res.status(422).json({ error: 'Matriz inválida o vacía' });
       }
 
-      // 1.b) (opcional) Leer GUION
+      // 1.b) Leer GUION (opcional)
       let scriptText = '';
       try {
         const buf = req.files?.script?.[0]?.buffer;
         if (buf && buf.length) {
-          // asumimos texto plano / markdown; se trunca por seguridad
           scriptText = buf.toString('utf-8').replace(/\s+/g, ' ').trim();
           if (scriptText.length > MAX_SCRIPT_CHARS) {
             scriptText = scriptText.slice(0, MAX_SCRIPT_CHARS) + ' ...';
           }
         }
-      } catch { /* si falla, seguimos sin guion */ }
+      } catch {}
 
       // 2) Crear job
       const jobId = makeJobId();
@@ -239,7 +272,7 @@ router.post(
       };
       jobs.set(jobId, job);
 
-      // 3) Responder de una vez con el jobId (frontend abrirá el SSE)
+      // 3) Responder con el jobId
       res.json({ jobId });
 
       // 4) Procesamiento en background
@@ -261,9 +294,9 @@ router.post(
             ? [
                 'Analiza la auditoría para Carteras Propias Bogotá.',
                 'Reglas específicas:',
-                '- **Cobro escalonado (CUMPLE)** solo si se ofrece primero un VALOR CAPITAL (saldo/valor total o monto alto) y luego se propone al menos UNA alternativa con DESCUENTO explícito sobre ese capital (porcentaje o cifra menor).',
+                '- Cobro escalonado (CUMPLE) solo si se ofrece primero un VALOR CAPITAL (saldo/valor total o monto alto) y luego al menos UNA alternativa con DESCUENTO explícito sobre ese capital (porcentaje o cifra menor).',
                 '- No penalizar por mencionar “plan de pagos/cuotas” si NO hay evidencia de que omitió el valor capital primero.',
-                '- **Debate objeciones**: considerar las situaciones típicas del cliente: Salud, Desempleo, Disminución de ingresos, Ya pagué a la entidad. CUMPLE si el agente identifica la situación concreta y responde con argumentos/beneficios alineados (al menos 1 respuesta pertinente).',
+                '- Debate objeciones: considerar situaciones típicas del cliente (Salud, Desempleo, Disminución de ingresos, Ya pagué a la entidad). CUMPLE si el agente identifica la situación concreta y responde con argumentos alineados.',
               ].join('\n')
             : (metodologia === 'cobranza' && cartera === 'carteras_medellin')
               ? 'Analiza la auditoría de la cartera Medellín siguiendo lineamientos de negociación, objeciones y formalidad.'
@@ -272,10 +305,7 @@ router.post(
         // Adjuntar guion al prompt (si viene)
         const promptParts = [baseCampaignPrompt];
         if (scriptText) {
-          promptParts.push(
-            'Guion de la campaña (extracto, usar para validar "uso de guion" y consistencia de ofrecimiento):\n' +
-            scriptText
-          );
+          promptParts.push('Guion de la campaña (extracto, usar para validar "uso de guion" y consistencia):\n' + scriptText);
         }
         const finalPrompt = promptParts.filter(Boolean).join('\n\n');
 
@@ -329,7 +359,7 @@ router.post(
             };
             saveAudit(audit);
 
-            // e) compact para front
+            // e) Compact para front
             const compact = compactAuditForFront(audit);
             job.items[i] = { name: f.originalname, status: 'done', callId, meta: compact };
             compactList.push(compact);

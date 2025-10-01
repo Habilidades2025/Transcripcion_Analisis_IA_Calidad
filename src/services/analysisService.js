@@ -33,12 +33,86 @@ function cleanName(x = '') {
   return s.replace(/^(señor(?:a)?|sr\.?|sra\.?|srta\.?|don|doña)\s+/i, '').trim();
 }
 
-/** Umbral de criticidad (por peso). Por defecto 100. */
-function isCriticalPeso(p) {
+/* ==================== Criticidad flexible ==================== */
+/**
+ * Determina si una fila de la matriz es crítica usando:
+ * - Flag explícito `critico` en la matriz (manda sobre todo).
+ * - Pistas en el criterio que indiquen NO crítico (opcional/no obligatorio).
+ * - Palabras clave en categoría/nombre que indiquen crítico (legal/compliance).
+ * - Peso (si CRITICAL_BY_WEIGHT=1) comparado contra CRITICAL_WEIGHT_VALUE.
+ */
+function isCriticalRow(row) {
   const thr = Number(process.env.CRITICAL_WEIGHT_VALUE || 100);
-  const n = Number(p);
-  return Number.isFinite(n) && n >= thr;
+  const byWeightEnabled = String(process.env.CRITICAL_BY_WEIGHT ?? '1') !== '0';
+
+  const nombre   = String(row?.atributo ?? row?.Atributo ?? '').toLowerCase();
+  const cat      = String(row?.categoria ?? row?.Categoria ?? '').toLowerCase();
+  const criterio = String(row?.criterio ?? '').toLowerCase();
+  const peso     = Number(row?.peso ?? row?.Peso ?? 0);
+  const flagCol  = (typeof row?.critico === 'boolean') ? row.critico : null;
+
+  const noncriticalHints = (process.env.NONCRITICAL_HINT_WORDS || 'opcional,no obligatorio,preferible,ideal')
+    .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+
+  const nameKeywords = (process.env.CRITICAL_NAME_KEYWORDS || 'tratamiento de datos,habeas data,autorización datos,consentimiento,legal,ley 1581')
+    .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+
+  const catKeywords = (process.env.CRITICAL_CATEGORY_KEYWORDS || 'crítico,critico,legal,obligatorio,compliance')
+    .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+
+  // 1) Columna/flag explícito manda
+  if (flagCol === true)  return true;
+  if (flagCol === false) return false;
+
+  // 2) Pistas de NO crítico en el criterio
+  if (noncriticalHints.some(w => criterio.includes(w))) return false;
+
+  // 3) Palabras de crítico por categoría o nombre
+  if (catKeywords.some(w => cat.includes(w)))     return true;
+  if (nameKeywords.some(w => nombre.includes(w))) return true;
+
+  // 4) Peso (si está habilitado)
+  if (byWeightEnabled && Number.isFinite(peso) && peso >= thr) return true;
+
+  // 5) Por defecto, NO crítico
+  return false;
 }
+/* ============================================================= */
+
+/* ==================== FRAUDE: configuración + heurística ==================== */
+const OFFICIAL_PAY_CHANNELS = (process.env.OFFICIAL_PAY_CHANNELS || 'link de pago,PSE,portal oficial,oficinas autorizadas')
+  .split(',').map(s => s.trim()).filter(Boolean);
+
+/** Heurística local anti-fraude */
+function detectFraudHeuristics(transcriptText = '') {
+  const txt = String(transcriptText || '');
+  if (!txt) return [];
+
+  const out = [];
+  const push = (tipo, cita, riesgo = 'alto') => {
+    if (!tipo || !cita) return;
+    out.push({ tipo, cita: String(cita).trim().slice(0, 200), riesgo });
+  };
+  const around = (i) => txt.slice(Math.max(0, i - 60), Math.min(txt.length, i + 120)).replace(/\s+/g, ' ').trim();
+
+  // A) otros números / número personal / whatsapp
+  const reAltNum = /\b(me\s+voy\s+a\s+comunicar|le\s+(?:escribo|llamo))\s+de\s+otro\s+n[úu]mero\b|\bn[úu]mero\s+personal\b|\bmi\s+(?:whatsapp|celular)\s+es\b/ig;
+  let m;
+  while ((m = reAltNum.exec(txt)) !== null) push('contacto_numero_no_oficial', around(m.index));
+
+  // B) cuentas/consignaciones
+  const reCuenta = /\b(cuenta(?:\s+de\s+(?:ahorros|corriente))?|consignar|consignación|transferir|dep[oó]sitar|nequi|daviplata|bancolombia|davivienda|bbva|colpatria|banco\s+de\s+bog[oó]t[aá]|efecty|baloto)\b[\s\S]{0,60}(\b\d[\d\s-]{6,}\b)/ig;
+  while ((m = reCuenta.exec(txt)) !== null) push('cuenta_no_oficial', around(m.index));
+
+  const seen = new Set();
+  return out.filter(a => {
+    const k = a.tipo + '|' + a.cita;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+/* ========================================================================== */
 
 export async function analyzeTranscriptWithMatrix({ transcript, matrix, prompt = '', context = {} }) {
   const client = new OpenAI({
@@ -70,11 +144,7 @@ export async function analyzeTranscriptWithMatrix({ transcript, matrix, prompt =
     return txt.slice(0, max);
   };
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-  const splitBatches = (arr, size) => {
-    const out = [];
-    for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-    return out;
-  };
+
   const makeReq = (userContent, maxTokens = MAX_TOKENS, extraSystem = []) => ({
     model,
     temperature: 0.2,
@@ -87,7 +157,13 @@ export async function analyzeTranscriptWithMatrix({ transcript, matrix, prompt =
         'Respondes ÚNICAMENTE en JSON válido y en español.',
         'Evalúa lista CERRADA y en el MISMO orden que los atributos solicitados.',
         'Cada "justificacion" debe citar o parafrasear una frase breve del audio cuando marques "cumplido": false.',
-        'No inventes datos fuera de la transcripción.'
+        'No inventes datos fuera de la transcripción.',
+        // --- Reglas anti-fraude para el modelo ---
+        `Canales oficiales de pago: ${OFFICIAL_PAY_CHANNELS.join(', ')}.`,
+        'Marca alerta de FRAUDE si el agente:',
+        '- Pide consignar/transferir a una cuenta o billetera NO listada como canal oficial.',
+        '- Indica que contactará desde “otro número”, “número personal”, “mi WhatsApp es…”, etc.',
+        'Incluye SIEMPRE una cita textual corta en cada alerta.'
       ].join(' ') },
       ...(context?.metodologia || context?.cartera || prompt || (extraSystem && extraSystem.length) ? [{
         role: 'system',
@@ -112,7 +188,7 @@ export async function analyzeTranscriptWithMatrix({ transcript, matrix, prompt =
     .filter(Boolean);
   const expectedCount = expectedAttrNames.length;
 
-  // ---------- Prompt base (genérico; las reglas de campaña vienen por `prompt`) ----------
+  // ---------- Prompt base ----------
   const baseUser = `
 Vas a AUDITAR una transcripción contra una MATRIZ DE CALIDAD. El campo "criterio" de cada atributo es la fuente principal de verdad.
 
@@ -127,8 +203,8 @@ ${transcriptText}
 
 Devuelve JSON ESTRICTAMENTE con el siguiente esquema (sin comentarios):
 {
-  "agent_name": "string (si el agente se presenta; si no, \"\")",
-  "client_name": "string (si el cliente es nombrado; si no, \"\")",
+  "agent_name": "string (si el agente se presenta; si no, \\"\")",
+  "client_name": "string (si el cliente es nombrado; si no, \\"\")",
   "resumen": "string (100-200 palabras, sin nombres inventados)",
   "hallazgos": ["string", "string", "string"],
   "atributos": [
@@ -141,14 +217,20 @@ Devuelve JSON ESTRICTAMENTE con el siguiente esquema (sin comentarios):
       "reconocimiento": "string (si se cumple de forma destacada)"
     }
   ],
-  "sugerencias_generales": ["string", "string", "string"]
+  "sugerencias_generales": ["string", "string", "string"],
+  "fraude": {
+    "alertas": [
+      { "tipo": "cuenta_no_oficial|contacto_numero_no_oficial|otro", "cita": "frase corta", "riesgo": "alto|medio|bajo" }
+    ],
+    "observaciones": "string opcional"
+  }
 }
 
 REGLAS (OBLIGATORIAS):
 - LISTA CERRADA: Evalúa ÚNICAMENTE los atributos listados arriba. No inventes atributos ni cambies los nombres.
 - ORDEN: Mantén el MISMO orden que en "ATRIBUTOS ESPERADOS".
 - EVIDENCIA: Si marcas "cumplido": false, incluye una cita o parafraseo breve del fragmento específico.
-- CRÍTICOS (según peso de la matriz): si NO hay evidencia explícita de cumplimiento, marca "cumplido": false (fail-closed) y explica. En no críticos, si no hay evidencia clara, "cumplido": true.
+- CRÍTICOS (según REGLAS de criticidad del sistema): si NO hay evidencia explícita de cumplimiento, marca "cumplido": false (fail-closed) y explica. En NO críticos, si no hay evidencia clara, mantén "cumplido": true (pass-open) con mejora sugerida.
 - No incluyas texto fuera del JSON.
 - Si no hay evidencia clara de nombres, deja "agent_name" y/o "client_name" como cadena vacía ("").
 `.trim();
@@ -163,7 +245,7 @@ REGLAS (OBLIGATORIAS):
       if (!json || !Array.isArray(json.atributos)) {
         throw new Error('El modelo no devolvió JSON válido con "atributos".');
       }
-      return finalizeFromLLM(json, matrix);
+      return finalizeFromLLM(json, matrix, transcriptText);
     } catch (err) {
       lastErr = err;
       const msg = String(err?.message || '').toLowerCase();
@@ -207,7 +289,7 @@ Devuelve el MISMO JSON solicitado antes (con TODOS los atributos y en el mismo o
     const raw  = completion.choices?.[0]?.message?.content || '';
     const json = forceJson(raw);
     if (json && Array.isArray(json.atributos)) {
-      return finalizeFromLLM(json, matrix);
+      return finalizeFromLLM(json, matrix, smallTranscript);
     }
     throw new Error('El modelo no devolvió JSON válido con "atributos" (modo truncado).');
   } catch (err2) {
@@ -227,20 +309,28 @@ Devuelve el MISMO JSON solicitado antes (con TODOS los atributos y en el mismo o
       atributo: String(row?.atributo ?? row?.Atributo ?? '').trim(),
       categoria: String(row?.categoria ?? row?.Categoria ?? ''),
       peso: Number(row?.peso ?? row?.Peso ?? 0),
-      critico: isCriticalPeso(row?.peso ?? row?.Peso ?? 0),
-      cumplido: !isCriticalPeso(row?.peso ?? row?.Peso ?? 0), // críticos -> false, no críticos -> true
-      justificacion: !isCriticalPeso(row?.peso ?? row?.Peso ?? 0)
-        ? 'No se evidencia incumplimiento'
-        : 'No se encontró evidencia explícita de cumplimiento (fail-closed por criticidad).',
+      critico: isCriticalRow(row),
+      cumplido: isCriticalRow(row) ? false : true, // críticos -> false, no críticos -> true
+      justificacion: isCriticalRow(row)
+        ? 'No se encontró evidencia explícita de cumplimiento (fail-closed por criticidad).'
+        : 'No se evidencia incumplimiento',
       mejora: null,
       reconocimiento: null
     }));
-    return { agent_name: '', client_name: '', resumen: '', hallazgos: [], atributos: full, sugerencias_generales: [] };
+    return {
+      agent_name: '',
+      client_name: '',
+      resumen: '',
+      hallazgos: [],
+      atributos: full,
+      sugerencias_generales: [],
+      fraude: { alertas: [], observaciones: '' }
+    };
   }
 }
 
 /** Une lo que devuelve el LLM con la matriz, garantizando TODOS los atributos en orden */
-function finalizeFromLLM(json, matrix) {
+function finalizeFromLLM(json, matrix, transcriptText = '') {
   const byName = new Map();
   for (const a of (json.atributos || [])) {
     const k = keyName(a?.atributo);
@@ -256,7 +346,7 @@ function finalizeFromLLM(json, matrix) {
     const found = byName.get(keyName(nombre));
     const categoria = String(found?.categoria ?? (row?.categoria ?? row?.Categoria ?? '')).trim();
     const peso = Number(row?.peso ?? row?.Peso ?? 0);
-    const critico = isCriticalPeso(peso);
+    const critico = isCriticalRow(row);
 
     // Default: críticos fail-closed, no críticos pass-open
     let cumplido;
@@ -286,13 +376,32 @@ function finalizeFromLLM(json, matrix) {
     });
   }
 
+  // --- Combinar FRAUDE del LLM + heurística local ---
+  const llmAlerts = Array.isArray(json?.fraude?.alertas) ? json.fraude.alertas : [];
+  const heurAlerts = detectFraudHeuristics(transcriptText);
+  const merge = [];
+  const seen = new Set();
+  for (const a of [...llmAlerts, ...heurAlerts]) {
+    const clean = {
+      tipo: String(a?.tipo || 'otro'),
+      cita: String(a?.cita || '').slice(0, 200),
+      riesgo: String(a?.riesgo || 'alto')
+    };
+    const k = clean.tipo + '|' + clean.cita;
+    if (clean.cita && !seen.has(k)) { seen.add(k); merge.push(clean); }
+  }
+
   return {
     agent_name: typeof json.agent_name === 'string' ? cleanName(json.agent_name) : '',
     client_name: typeof json.client_name === 'string' ? cleanName(json.client_name) : '',
     resumen: json.resumen,
     hallazgos: Array.isArray(json.hallazgos) ? json.hallazgos : [],
     atributos: full,
-    sugerencias_generales: Array.isArray(json.sugerencias_generales) ? json.sugerencias_generales : []
+    sugerencias_generales: Array.isArray(json.sugerencias_generales) ? json.sugerencias_generales : [],
+    fraude: {
+      alertas: merge,
+      observaciones: typeof json?.fraude?.observaciones === 'string' ? json.fraude.observaciones : ''
+    }
   };
 }
 
@@ -363,7 +472,7 @@ ${transcriptText}
 
     const categoria = String(found?.categoria ?? (row?.categoria ?? row?.Categoria ?? '')).trim();
     const peso = Number(row?.peso ?? row?.Peso ?? 0);
-    const critico = isCriticalPeso(peso);
+    const critico = isCriticalRow(row);
 
     let cumplido;
     if (typeof found?.cumplido === 'boolean') {
@@ -396,8 +505,8 @@ ${transcriptText}
   const miniUser = `
 A partir de la transcripción, devuelve ÚNICAMENTE este JSON:
 {
-  "agent_name": "string (si el agente se presenta; si no, \"\")",
-  "client_name": "string (si el cliente es nombrado; si no, \"\")",
+  "agent_name": "string (si el agente se presenta; si no, \\"\")",
+  "client_name": "string (si el cliente es nombrado; si no, \\"\")",
   "resumen": "100-200 palabras",
   "hallazgos": ["string","string","string"],
   "sugerencias_generales": ["string","string","string"]
@@ -435,5 +544,11 @@ ${transcriptText}
     }
   } catch { /* si falla, devolvemos vacío sin romper */ }
 
-  return { agent_name, client_name, resumen, hallazgos, atributos: full, sugerencias_generales };
+  // En el modo por lotes, usamos solo la heurística local para fraude
+  const fraude = {
+    alertas: detectFraudHeuristics(transcriptText),
+    observaciones: ''
+  };
+
+  return { agent_name, client_name, resumen, hallazgos, atributos: full, sugerencias_generales, fraude };
 }
