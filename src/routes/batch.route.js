@@ -292,7 +292,7 @@ router.post(
         const baseCampaignPrompt =
           (metodologia === 'cobranza' && cartera === 'carteras_bogota')
             ? [
-                'Analiza la auditoría para Carteras Propias Bogotá.',
+                'Analiza la auditoría para Carteras Propias Bogotá siguiendo lineamientos de negociación, objeciones y formalidad.',
                 'Reglas específicas:',
                 '- Cobro escalonado (CUMPLE) solo si se ofrece primero un VALOR CAPITAL (saldo/valor total o monto alto) y luego al menos UNA alternativa con DESCUENTO explícito sobre ese capital (porcentaje o cifra menor).',
                 '- No penalizar por mencionar “plan de pagos/cuotas” si NO hay evidencia de que omitió el valor capital primero.',
